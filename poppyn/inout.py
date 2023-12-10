@@ -5,9 +5,9 @@ import dask.array as da
 from dask.array.image import imread
 from tifffile import imsave
 
-from statics import WORLD_FILE, WORLD_SLICES
+from .statics import WORLD_FILE, WORLD_SLICES
 
-DEFAULT_DATA_DIR = Path(__file__).parent / "data"
+DEFAULT_DATA_DIR = Path(__file__).parent.parent / "data"
 
 
 def get_data_path(fn):
@@ -17,12 +17,16 @@ def get_data_path(fn):
     return fn
 
 
-def load_data(fn=WORLD_FILE, raw=False):
+def load_data(fn=WORLD_FILE, nan_ocean=True, raw=False):
     fn = get_data_path(fn)
     darr = imread(str(fn))
     if raw:
         return darr
-    darr = da.where(darr < 0, np.nan, darr)
+    if nan_ocean:
+        darr = da.where(darr < 0, np.nan, darr)
+    else:
+        darr = da.where(da.isnan(darr), 0, darr)
+        darr = da.where(darr < 0, 0, darr)
     return darr.compute()[0]
 
 
@@ -31,7 +35,9 @@ def save_data(fn, arr):
     imsave(str(fn), arr)
 
 
-def get_slice_filename(key):
+def get_slice_filename(key=None):
+    if key is None:
+        return WORLD_FILE
     return WORLD_FILE.split(".")[0] + f"_{key}_only.tif"
 
 
@@ -44,7 +50,7 @@ def generate_slice(key, arr=None):
     return arr_partial
 
 
-def load_slice(key):
+def load_slice(key=None):
     fn = get_slice_filename(key)
     if get_data_path(fn).exists():
         return load_data(fn)

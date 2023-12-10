@@ -1,9 +1,8 @@
 import numpy as np
 from numba import njit
 
-
 @njit
-def apply_nbhd_gens(arr, nbhood_func, nb_size, target, num_gens):
+def apply_nbhood_gens(arr, target, nb_func, nb_size, num_gens):
     N = arr.shape[0]
     M = arr.shape[1]
 
@@ -26,7 +25,7 @@ def apply_nbhd_gens(arr, nbhood_func, nb_size, target, num_gens):
                 nbhood[middle+ion:middle+iop, middle+jon:middle+jop] = arr[i+ion:i+iop, j+jon:j+jop]
 
                 func_out.fill(0)
-                nbhd_diff = nbhood_func(func_out, nbhood, target)
+                nbhd_diff = nb_func(func_out, nbhood, target)
                 gen_diff[i+ion:i+iop, j+jon:j+jop] += nbhd_diff[middle+ion:middle+iop, middle+jon:middle+jop]
 
         arr[:, :] += gen_diff
@@ -76,3 +75,9 @@ def nb_trickle(out, nbhood, target):
     out[middle, middle] = 0
     out[middle, middle] = -np.nansum(out)
     return out
+
+
+def nbhood_gens(arr, target, nb_func=nb_flatten, nb_size=3, num_gens=100):
+    out = arr[:, :]
+    return apply_nbhood_gens(out, target, nb_func, nb_size, num_gens)
+
