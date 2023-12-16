@@ -1,5 +1,5 @@
 import numpy as np
-from numba import njit
+from .neighbours import apply_nbhood_gens, growing_nb_wrapper, nb_flatten, nb_slide
 
 
 def get_coordinate_ordering(arr):
@@ -25,20 +25,26 @@ def select_largest_points(arr, target):
     return out
 
 
-def select_and_flatten_largest_points(arr, target, delay_reordering=100):
+def select_and_flatten_largest_points(arr, target, no_reorder_before=5, reorder_after=100):
     out = np.zeros_like(arr, dtype=bool)
+    arr = arr.copy()
     num_points = int(np.nansum(arr) // target) + 1
     ordering = None
-    for ip in range(num_points):
-        if ordering is None or ip % delay_reordering == 0:
+    ip = 0
+    for _ in range(num_points):
+        if ordering is None or ip >= reorder_after:
             ordering = get_coordinate_ordering(arr)
+            ip = 0
 
         idx = (ordering[0][-1-ip], ordering[1][-1-ip])
-        out[*idx] = True
+        if ip >= no_reorder_before and arr[*idx] < target:
+            apply_nbhood_gens(nb_slide, arr, target, 3, 10)
+            ordering = None
+            continue
 
-        split_remainder = (arr[*idx] - target) / 8
-        for ii in range(-1, 2):
-            for jj in range(-1, 2):
-                arr[idx[0]+ii, idx[1]+jj] += split_remainder
+        out[*idx] = True
+        growing_nb_wrapper(nb_flatten, arr, idx[0], idx[1], target, 100, arr)
+        arr[*idx] = np.nan
+
         ip += 1
     return out

@@ -1,46 +1,14 @@
 import numpy as np
 from numba import njit
 
-@njit
-def apply_nbhood_gens(arr, target, nb_func, nb_size, num_gens):
-    N = arr.shape[0]
-    M = arr.shape[1]
-
-    middle = (nb_size - 1) // 2
-
-    for g in range(num_gens):
-        gen_diff = np.zeros((N, M), dtype=np.float32)
-        nbhood = np.zeros((nb_size, nb_size), dtype=np.float32)
-        func_out = np.zeros((nb_size, nb_size), dtype=np.float32)
-
-        for i in range(N):
-            ion = -middle + np.maximum(middle - i, 0)
-            iop = middle + 1 + np.minimum(N - i - 1 - middle, 0)
-
-            for j in range(M):
-                jon = -middle + np.maximum(middle - j, 0)
-                jop = middle + 1 + np.minimum(M - j - 1 - middle, 0)
-
-                nbhood.fill(np.nan)
-                nbhood[middle+ion:middle+iop, middle+jon:middle+jop] = arr[i+ion:i+iop, j+jon:j+jop]
-
-                func_out.fill(0)
-                nbhd_diff = nb_func(func_out, nbhood, target)
-                gen_diff[i+ion:i+iop, j+jon:j+jop] += nbhd_diff[middle+ion:middle+iop, middle+jon:middle+jop]
-
-        arr[:, :] += gen_diff
-    return arr
-
 
 @njit
-def nb_flatten(out, nbhood, target):
-    nb_size = out.shape[0]
-    middle = (nb_size - 1) // 2
-    cval = nbhood[middle, middle]
-
-    if np.isnan(cval):
+def nb_slide(nbhood, i, j, target):
+    out = np.zeros_like(nbhood)
+    if np.isnan(nbhood[i, j]):
         return out
 
+    cval = nbhood[i, j]
     is_smaller = (nbhood < cval).astype(np.float32)
     num_smaller = np.nansum(is_smaller)
     if num_smaller == 0:
@@ -52,32 +20,82 @@ def nb_flatten(out, nbhood, target):
         out[:, :] += -is_smaller * nbhood / (out.size - 1)
 
     out[:, :] *= (~np.isnan(nbhood)).astype(np.float32)
-    out[middle, middle] = 0
-    out[middle, middle] = -np.nansum(out)
+    out[i, j] = 0
+    out[i, j] = -np.nansum(out)
     return out
 
 
 @njit
-def nb_trickle(out, nbhood, target):
-    nb_size = out.shape[0]
-    middle = (nb_size - 1) // 2
-    cval = nbhood[middle, middle]
-
-    if np.isnan(cval):
+def nb_flatten(nbhood, i, j, target):
+    out = np.zeros_like(nbhood)
+    if np.isnan(nbhood[i, j]):
         return out
 
-    if cval <= target - (out.size - 1):
+    if nbhood[i, j] <= target - (out.size - 1):
         out[:, :] = -1
-    elif cval >= target + (out.size - 1):
+    elif nbhood[i, j] >= target + (out.size - 1):
         out[:, :] = 1
 
     out[:, :] *= (~np.isnan(nbhood)).astype(np.float32)
-    out[middle, middle] = 0
-    out[middle, middle] = -np.nansum(out)
+    out[i, j] = 0
+    out[i, j] = -np.nansum(out)
     return out
 
 
-def nbhood_gens(arr, target, nb_func=nb_flatten, nb_size=3, num_gens=100):
-    out = arr[:, :]
-    return apply_nbhood_gens(out, target, nb_func, nb_size, num_gens)
+@njit
+def nb_flatten(nbhood, i, j, target):
+    non_nan = (~np.isnan(nbhood)).astype(np.float32)
+    nnsum = np.nansum(non_nan)
+    diff_v = nbhood[i, j] - target
+    split_v = (diff_v / (nnsum - 1))
+    out = split_v * non_nan
+    out[i, j] = -diff_v
+    return out
+
+
+@njit
+def nb_wrapper(nb_func, arr, i, j, target, size, out):
+    if np.isnan(arr[i, j]):
+        return False
+    i0 = i - size
+    i1 = i + size + 1
+    j0 = j - size
+    j1 = j + size + 1
+    if i0 < 0: i0 = 0
+    if j0 < 0: j0 = 0
+    if i1 > arr.shape[0]: i1 = arr.shape[0]
+    if j1 > arr.shape[1]: j1 = arr.shape[1]
+
+    nbhood = arr[i0:i1, j0:j1]
+    if np.isnan(nbhood).sum() == nbhood.size - 1:
+        return False
+    out[i0:i1, j0:j1] = out[i0:i1, j0:j1] + nb_func(nbhood, i-i0, j-j0, target)
+    return True
+
+
+@njit
+def growing_nb_wrapper(nb_func, arr, i, j, target, max_size, out):
+    if np.isnan(arr[i, j]):
+        return False
+    for size in range(1, max_size + 1):
+        ret = nb_wrapper(nb_func, arr, i, j, target, size, out)
+        if ret:
+            return True
+    return False
+
+
+@njit
+def apply_nbhood_gens(nb_func, arr, target, nb_max_size, num_gens):
+    N = arr.shape[0]
+    M = arr.shape[1]
+
+    for g in range(num_gens):
+        gen_diff = np.zeros((N, M), dtype=np.float32)
+
+        for i in range(N):
+            for j in range(M):
+                growing_nb_wrapper(nb_func, arr, i, j, target, nb_max_size, gen_diff)
+
+        arr[:, :] += gen_diff
+    return arr
 

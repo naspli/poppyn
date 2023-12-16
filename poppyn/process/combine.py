@@ -31,7 +31,10 @@ def njit_reduce_resolution(out, arr, factor):
     return out
 
 
-def reduce_resolution(arr, factor):
+def reduce_resolution(arr, factor=None, max_size=None):
+    if max_size is not None:
+        assert factor is None
+        factor = max(arr.shape) // max_size
     arr_reduce = np.zeros(tuple([(n // factor) + 1 for n in arr.shape]), dtype=arr.dtype)
     arr_reduce.fill(np.nan)
     return njit_reduce_resolution(arr_reduce, arr, factor)

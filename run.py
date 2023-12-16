@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import numpy as np
 
 from poppyn.inout import *
 from poppyn.plot import *
@@ -15,10 +16,10 @@ from poppyn.process.ordered import *
 arr = load_slice()
 show_data_logscale(arr)
 
-arr = reduce_resolution(arr, 100)
+arr = reduce_resolution(arr, max_size=500)
 show_data_logscale(arr)
 
-arr = select_and_flatten_largest_points(arr, 1000000)
+arr = select_and_flatten_largest_points(arr, np.nansum(arr) // 3500)
 show_data(arr)
 
 # show_data_logscale(arrx)
