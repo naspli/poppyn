@@ -1,9 +1,9 @@
 import matplotlib.pyplot as plt
 
-from poppyn.inout import load_slice, load_data
-from poppyn.plot import show_data, show_data_logscale
-from poppyn.process.combine import reduce_resolution
-from poppyn.process.ordered import select_largest_points, rank_points
+from poppyn.inout import *
+from poppyn.plot import *
+from poppyn.process.combine import *
+from poppyn.process.ordered import *
 
 # try ordering everything min->max
 # then "select" the points 1-by-1 instead
@@ -15,10 +15,10 @@ from poppyn.process.ordered import select_largest_points, rank_points
 arr = load_slice()
 show_data_logscale(arr)
 
-arr = reduce_resolution(arr, 30)
+arr = reduce_resolution(arr, 100)
 show_data_logscale(arr)
 
-arr = select_largest_points(arr, 1000000)
+arr = select_and_flatten_largest_points(arr, 1000000)
 show_data(arr)
 
 # show_data_logscale(arrx)
