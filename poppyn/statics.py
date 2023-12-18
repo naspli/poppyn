@@ -3,6 +3,9 @@
 # of 30 arc (approximately 1km at the equator). The projection is Geographic Coordinate System, WGS84. The units are
 # number of people per pixel. The mapping approach is Random Forest-based dasymetric redistribution.
 WORLD_FILE = "ppp_2020_1km_Aggregated.tif"
+# https://data.worldpop.org/GIS/Pixel_area/Global_2000_2020/0_Mosaicked/global_px_area_1km.tif
+# similarly land-area from WorldPop
+AREA_FILE = "global_px_area_1km.tif"
 WORLD_SIZE = (18720, 43200)
 
 WORLD_SLICES = {

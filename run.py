@@ -1,32 +1,25 @@
 import matplotlib.pyplot as plt
-import numpy as np
 
 from poppyn.inout import *
 from poppyn.plot import *
 from poppyn.process.combine import *
 from poppyn.process.ordered import *
 
-# try ordering everything min->max
-# then "select" the points 1-by-1 instead
-# once selected, dump extra points to neighbours (discourage ocean/zeros but make impossible to already selected points)
-# once drop below threshold, do a neighbour blur and reorder again
-# repeat until you have selected total_pop / target points
+slice_name = "GB"
+max_resolution = 1000
+pop_target = 10_000
 
+cache_key = f"{slice_name}_{max_resolution}_{pop_target}"
 
-arr = load_slice()
-show_data_logscale(arr)
+if get_data_path(get_slice_filename(cache_key)).exists():
+    bin_arr = load_slice(cache_key)
+else:
+    og_arr = load_slice(slice_name)
+    red_arr = reduce_resolution(og_arr, max_size=max_resolution, min_pop=0.01 * pop_target)
+    bin_arr = select_and_flatten_largest_points(red_arr, pop_target)
+    save_slice(cache_key, bin_arr)
 
-arr = reduce_resolution(arr, max_size=500)
-show_data_logscale(arr)
-
-arr = select_and_flatten_largest_points(arr, np.nansum(arr) // 3500)
+arr = np.nan_to_num(bin_arr, nan=-0.1)
 show_data(arr)
 
-# show_data_logscale(arrx)
-#
-# arr2 = apply_nbhd_gens(arrx, nb_flatten, nb_size=3, target=1000000, num_gens=100)
-# show_data(arr2)
-#
-# arr3 = apply_nbhd_gens(arr2, nb_flatten, nb_size=10, target=1000000, num_gens=100)
-# show_data(arr3)
 plt.show(block=True)

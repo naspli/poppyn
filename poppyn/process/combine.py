@@ -3,9 +3,11 @@ from numba import njit
 
 
 @njit
-def njit_reduce_resolution(out, arr, factor):
+def njit_reduce_resolution(out, arr, factor, min_pop):
     N = arr.shape[0]
     M = arr.shape[1]
+
+    num_nan = np.full_like(out, -1)
 
     ii = 0
     ic = 0
@@ -19,6 +21,9 @@ def njit_reduce_resolution(out, arr, factor):
             elif not np.isnan(arr[i, j]):
                 out[ii, jj] += arr[i, j]
 
+            if np.isnan(arr[i, j]):
+                num_nan[ii, jj] += 1
+
             jc += 1
             if jc == factor:
                 jc = 0
@@ -28,13 +33,15 @@ def njit_reduce_resolution(out, arr, factor):
         if ic == factor:
             ic = 0
             ii += 1
+
+    out = np.where((num_nan > 0.5 * factor ** 2) & (out < min_pop), np.nan, out)
     return out
 
 
-def reduce_resolution(arr, factor=None, max_size=None):
+def reduce_resolution(arr, factor=None, max_size=None, min_pop=1):
     if max_size is not None:
         assert factor is None
         factor = max(arr.shape) // max_size
     arr_reduce = np.zeros(tuple([(n // factor) + 1 for n in arr.shape]), dtype=arr.dtype)
     arr_reduce.fill(np.nan)
-    return njit_reduce_resolution(arr_reduce, arr, factor)
+    return njit_reduce_resolution(arr_reduce, arr, factor, min_pop)

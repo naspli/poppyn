@@ -8,8 +8,13 @@ def get_coordinate_ordering(arr):
     return np.unravel_index(ordering, arr.shape)
 
 
+def map_na(na_arr, val_arr):
+    return np.where(np.isnan(na_arr), na_arr, val_arr)
+
+
 def rank_points(arr):
     out = np.zeros_like(arr, dtype=int)
+    out = map_na(arr, out)
     ordering = get_coordinate_ordering(arr)
     for i in range(ordering[0].size):
         out[ordering[0][i], ordering[1][i]] = i
@@ -18,6 +23,7 @@ def rank_points(arr):
 
 def select_largest_points(arr, target):
     out = np.zeros_like(arr, dtype=bool)
+    out = map_na(arr, out)
     ordering = get_coordinate_ordering(arr)
     num_points = int(np.nansum(arr) // target) + 1
     for ip in range(num_points):
@@ -27,6 +33,7 @@ def select_largest_points(arr, target):
 
 def select_and_flatten_largest_points(arr, target, no_reorder_before=5, reorder_after=100):
     out = np.zeros_like(arr, dtype=bool)
+    out = map_na(arr, out)
     arr = arr.copy()
     num_points = int(np.nansum(arr) // target) + 1
     ordering = None
