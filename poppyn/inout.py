@@ -16,6 +16,8 @@ DEFAULT_IMAGES_DIR = BASE_DIR / "images"
 def get_data_path(fn):
     fn = Path(fn)
     if not fn.is_absolute():
+        if not DEFAULT_DATA_DIR.exists():
+            DEFAULT_DATA_DIR.mkdir()
         fn = DEFAULT_DATA_DIR / fn
     return fn
 
@@ -47,13 +49,17 @@ def save_slice(key, arr):
 def get_slice_filename(key=None):
     if not key:
         return WORLD_FILE
-    return WORLD_FILE.split(".")[0] + f"_{key}_only.tif"
+    return WORLD_FILE.split(".")[0] + f"_{key.replace(' ', '')}_only.tif"
 
 
-def generate_slice(key, arr=None):
+def generate_slice(key, arr=None, idx=None):
     if arr is None:
         arr = load_data(WORLD_FILE)
-    y, x = WORLD_SLICES[key]
+    if idx is None:
+        y, x = WORLD_SLICES[key]
+    else:
+        y = idx[0], idx[1]
+        x = idx[2], idx[3]
     arr_partial = arr[y[0]:y[1], x[0]:x[1]]
     save_slice(key, arr_partial)
     return arr_partial
@@ -71,12 +77,12 @@ def get_scale(arr, key=None):
     return (og_shape[0] / arr.shape[0]) * (og_shape[1] / arr.shape[1])
 
 
-def load_slice(key=None):
+def load_slice(key=None, idx=None):
     fn = get_slice_filename(key)
     if get_data_path(fn).exists():
         return load_data(fn)
     else:
-        return generate_slice(key)
+        return generate_slice(key, idx=idx)
 
 
 def get_image_filename(key=None):
@@ -87,4 +93,6 @@ def get_image_filename(key=None):
 
 def save_image(key, fig):
     fn = get_image_filename(key)
+    if not DEFAULT_IMAGES_DIR.exists():
+        DEFAULT_IMAGES_DIR.mkdir()
     fig.savefig(DEFAULT_IMAGES_DIR / fn, dpi=100)
