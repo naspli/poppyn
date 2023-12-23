@@ -1,13 +1,16 @@
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import dask.array as da
 from dask.array.image import imread
 from tifffile import imsave
 
-from .statics import WORLD_FILE, WORLD_SLICES, AREA_FILE
+from .statics import WORLD_FILE, WORLD_SLICES, WORLD_SIZE, AREA_FILE
 
-DEFAULT_DATA_DIR = Path(__file__).parent.parent / "data"
+BASE_DIR = Path(__file__).parent.parent
+DEFAULT_DATA_DIR = BASE_DIR / "data"
+DEFAULT_IMAGES_DIR = BASE_DIR / "images"
 
 
 def get_data_path(fn):
@@ -56,9 +59,32 @@ def generate_slice(key, arr=None):
     return arr_partial
 
 
+def get_slice_size(key=None):
+    if not key:
+        return WORLD_SIZE
+    y, x = WORLD_SLICES[key]
+    return y[1]-y[0], x[1]-x[0]
+
+
+def get_scale(arr, key=None):
+    og_shape = get_slice_size(key)
+    return (og_shape[0] / arr.shape[0]) * (og_shape[1] / arr.shape[1])
+
+
 def load_slice(key=None):
     fn = get_slice_filename(key)
     if get_data_path(fn).exists():
         return load_data(fn)
     else:
         return generate_slice(key)
+
+
+def get_image_filename(key=None):
+    if not key:
+        return "world.png"
+    return WORLD_FILE.split(".")[0] + f"_{key}_only.png"
+
+
+def save_image(key, fig):
+    fn = get_image_filename(key)
+    fig.savefig(DEFAULT_IMAGES_DIR / fn, dpi=100)

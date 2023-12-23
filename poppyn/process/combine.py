@@ -7,41 +7,37 @@ def njit_reduce_resolution(out, arr, factor, min_pop):
     N = arr.shape[0]
     M = arr.shape[1]
 
-    num_nan = np.full_like(out, -1)
+    num_nan = np.zeros_like(out)
 
     ii = 0
-    ic = 0
+    next_i = int(factor)
     for i in range(N):
 
         jj = 0
-        jc = 0
+        next_j = int(factor)
         for j in range(M):
-            if np.isnan(out[ii, jj]):
-                out[ii, jj] = arr[i, j]
-            elif not np.isnan(arr[i, j]):
-                out[ii, jj] += arr[i, j]
-
             if np.isnan(arr[i, j]):
                 num_nan[ii, jj] += 1
+            else:
+                out[ii, jj] += arr[i, j]
 
-            jc += 1
-            if jc == factor:
-                jc = 0
+            while j >= next_j:
                 jj += 1
+                next_j = int(factor * (jj + 1))
 
-        ic += 1
-        if ic == factor:
-            ic = 0
+        while i >= next_i:
             ii += 1
+            next_i = int(factor * (ii+1))
 
     out = np.where((num_nan > 0.5 * factor ** 2) & (out < min_pop), np.nan, out)
     return out
 
 
 def reduce_resolution(arr, factor=None, max_size=None, min_pop=1):
+    if int(max_size is None) + int(factor is None) != 1:
+        raise ValueError("Provide exactly one of factor or max_size")
     if max_size is not None:
-        assert factor is None
-        factor = max(arr.shape) // max_size
-    arr_reduce = np.zeros(tuple([(n // factor) + 1 for n in arr.shape]), dtype=arr.dtype)
-    arr_reduce.fill(np.nan)
+        factor = max(arr.shape) / max_size
+
+    arr_reduce = np.zeros(tuple([int((n / factor) + 0.5) for n in arr.shape]), dtype=arr.dtype)
     return njit_reduce_resolution(arr_reduce, arr, factor, min_pop)

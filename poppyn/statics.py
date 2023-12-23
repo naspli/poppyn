@@ -9,6 +9,6 @@ AREA_FILE = "global_px_area_1km.tif"
 WORLD_SIZE = (18720, 43200)
 
 WORLD_SLICES = {
-    "GB": ((2500, 4500), (20000, 22000)),
+    "Britain": ((2500, 4500), (20000, 22000)),
     "London": ((3830, 3960), (21480, 21690))
 }
