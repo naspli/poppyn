@@ -2,7 +2,7 @@ import argparse
 
 import matplotlib.pyplot as plt
 
-from poppyn.inout import load_slice
+from poppyn.inout import load_or_generate_slice
 from poppyn.plot import plot_data
 from poppyn.process.transform import logscale
 
@@ -13,7 +13,7 @@ def main():
                         help="Use a pre-defined slice of the World map (see statics.py)")
     args = parser.parse_args()
 
-    arr = load_slice(args.slice_name)
+    arr = load_or_generate_slice(args.slice_name)
     log_arr = logscale(arr)
     plot_data(
         log_arr,

@@ -39,5 +39,10 @@ def reduce_resolution(arr, factor=None, max_size=None, min_pop=1):
     if max_size is not None:
         factor = max(arr.shape) / max_size
 
+    if factor < 1.0:
+        return arr
+
     arr_reduce = np.zeros(tuple([int((n / factor) + 0.5) for n in arr.shape]), dtype=arr.dtype)
+
+    print(f"Reducing resolution from {arr.shape} to {arr_reduce.shape}")
     return njit_reduce_resolution(arr_reduce, arr, factor, min_pop)

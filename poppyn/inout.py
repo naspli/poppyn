@@ -10,20 +10,18 @@ from .statics import WORLD_FILE, WORLD_SLICES, WORLD_SIZE, AREA_FILE
 
 BASE_DIR = Path(__file__).parent.parent
 DEFAULT_DATA_DIR = BASE_DIR / "data"
-DEFAULT_IMAGES_DIR = BASE_DIR / "images"
 
 
 def get_data_path(fn):
     fn = Path(fn)
     if not fn.is_absolute():
-        if not DEFAULT_DATA_DIR.exists():
-            DEFAULT_DATA_DIR.mkdir()
         fn = DEFAULT_DATA_DIR / fn
     return fn
 
 
 def load_data(fn=WORLD_FILE, min_land_area=50_000, raw=False):
     path = get_data_path(fn)
+    print(f"Reading data from [{path}]")
     darr = imread(str(path))
     if raw:
         return darr
@@ -37,62 +35,67 @@ def load_data(fn=WORLD_FILE, min_land_area=50_000, raw=False):
 
 
 def save_data(fn, arr):
-    fn = get_data_path(fn)
-    imsave(str(fn), arr)
+    path = get_data_path(fn)
+    print(f"Dumping data to [{path}]")
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True)
+    imsave(str(path), arr)
 
 
-def save_slice(key, arr):
-    fn = get_slice_filename(key)
-    save_data(fn, arr)
-
-
-def get_slice_filename(key=None):
-    if not key:
+def get_slice_filename(slice_name):
+    if not slice_name:
         return WORLD_FILE
-    return WORLD_FILE.split(".")[0] + f"_{key.replace(' ', '')}_only.tif"
+    return f"cache/sliced/{slice_name.replace(' ', '')}_only.tif"
 
 
-def generate_slice(key, arr=None, idx=None):
+def generate_slice(slice_name, arr=None, idx=None):
+    print("Generating slice from world file")
     if arr is None:
         arr = load_data(WORLD_FILE)
     if idx is None:
-        y, x = WORLD_SLICES[key]
+        y, x = WORLD_SLICES[slice_name]
     else:
         y = idx[0], idx[1]
         x = idx[2], idx[3]
     arr_partial = arr[y[0]:y[1], x[0]:x[1]]
-    save_slice(key, arr_partial)
+    fn = get_slice_filename(slice_name)
+    save_data(fn, arr_partial)
     return arr_partial
 
 
-def get_slice_size(key=None):
-    if not key:
+def get_slice_size(slice_name):
+    if not slice_name:
         return WORLD_SIZE
-    y, x = WORLD_SLICES[key]
+    y, x = WORLD_SLICES[slice_name]
     return y[1]-y[0], x[1]-x[0]
 
 
-def get_scale(arr, key=None):
-    og_shape = get_slice_size(key)
+def get_scale(arr, slice_name):
+    og_shape = get_slice_size(slice_name)
     return (og_shape[0] / arr.shape[0]) * (og_shape[1] / arr.shape[1])
 
 
-def load_slice(key=None, idx=None):
-    fn = get_slice_filename(key)
+def load_or_generate_slice(slice_name, idx=None):
+    print(f"Fetching slice {slice_name}")
+    fn = get_slice_filename(slice_name)
     if get_data_path(fn).exists():
         return load_data(fn)
     else:
-        return generate_slice(key, idx=idx)
+        return generate_slice(slice_name, idx=idx)
 
 
-def get_image_filename(key=None):
-    if not key:
-        return "world.png"
-    return WORLD_FILE.split(".")[0] + f"_{key}_only.png"
+def get_cache_filename(cache_key):
+    return f"cache/processed/poppyn_{cache_key}.tif"
 
 
-def save_image(key, fig):
-    fn = get_image_filename(key)
-    if not DEFAULT_IMAGES_DIR.exists():
-        DEFAULT_IMAGES_DIR.mkdir()
-    fig.savefig(DEFAULT_IMAGES_DIR / fn, dpi=100)
+def get_image_filename(cache_key):
+    return f"output/poppyn_{cache_key}.png"
+
+
+def save_image(cache_key, fig):
+    fn = get_image_filename(cache_key)
+    path = get_data_path(fn)
+    print(f"Dumping image to {path}")
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True)
+    fig.savefig(path, dpi=100)

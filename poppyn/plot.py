@@ -3,6 +3,7 @@ from matplotlib import pyplot as plt
 
 
 def plot_data(arr, slice_name=None, pop_target=None, scale=None, max_in=None, hide_text=False):
+    print("Generating plot")
 
     # Create the figure and axis
     height, width = arr.shape
@@ -57,7 +58,7 @@ def plot_data(arr, slice_name=None, pop_target=None, scale=None, max_in=None, hi
         ax.text(16, height - 36, text, fontdict=font_properties, ha='left', va='top')
 
         font_properties = {**font_properties, 'size': 10}
-        text = (f"Original Dataset: WorldPop (DOI 10.5258/SOTON/WP00647)\n"
-                f"Source Code: 'Poppyn' (github.com/Meta95/poppyn)")
+        text = (f"Raw Data: WorldPop (DOI 10.5258/SOTON/WP00647)\n"
+                f"Source: 'Poppyn' (github.com/naspli/poppyn) / @_naspli")
         ax.text(16, 8, text, fontdict=font_properties, ha='left', va='bottom')
     return fig

@@ -17,7 +17,7 @@ This loses some local geographical accuracy,
 but helps massively for simple visual comparison of population.
 
 The implementation of this flattening is in function `select_and_flatten_largest_points`.
-To run Poppyn yourself, see `run.py`, or add this directory to your `PYTHONPATH` and 
+To run Poppyn yourself, see `run_all.py`, or add this directory to your `PYTHONPATH` and 
 simply `import poppyn`.
 
 TODO: link to blog post with examples.
