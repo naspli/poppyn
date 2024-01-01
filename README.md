@@ -20,4 +20,4 @@ The implementation of this flattening is in function `select_and_flatten_largest
 To run Poppyn yourself, see `run_all.py`, or add this directory to your `PYTHONPATH` and 
 simply `import poppyn`.
 
-TODO: link to blog post with examples.
+See full justification on [this blog-post](https://medium.com/@naspli/making-spatial-population-data-easier-to-comprehend-053e6035c000)
