@@ -37,6 +37,9 @@ def plot_data(arr, slice_name=None, pop_target=None, scale=None, max_in=None, hi
     plt.gca().xaxis.set_major_locator(plt.NullLocator())
     plt.gca().yaxis.set_major_locator(plt.NullLocator())
 
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
     if not hide_text:
         slice_name = "the World" if not slice_name else slice_name
         # Add text to the image
