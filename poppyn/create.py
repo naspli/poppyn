@@ -1,9 +1,14 @@
+import dask.array as da
+import numpy as np
+from dask.diagnostics import ProgressBar
+
 from poppyn.inout import get_data_path, get_cache_filename, load_or_generate_slice, load_data, save_data
 from poppyn.process.combine import reduce_resolution
 from poppyn.process.ordered import select_and_flatten_largest_points
 
 
-def create_binary_population_map(slice_name, max_resolution, pop_target, slice_idx=None, force_rerun=False):
+def create_binary_population_map(slice_name, max_resolution, pop_target, slice_idx=None, force_rerun=False,
+                                 parallel_chunks=None):
     cache_key = f"{slice_name.replace(' ', '')}_{max_resolution}_{pop_target}"
     cache_path = get_data_path(get_cache_filename(cache_key))
 
@@ -17,7 +22,16 @@ def create_binary_population_map(slice_name, max_resolution, pop_target, slice_i
 
     red_arr = reduce_resolution(og_arr, max_size=max_resolution, min_pop=0.01 * pop_target)
 
-    bin_arr = select_and_flatten_largest_points(red_arr, pop_target)
+    print("Running population data flattening algorithm")
+    if parallel_chunks is None:
+        bin_arr = select_and_flatten_largest_points(red_arr, int(pop_target), 5, 100)
+    else:
+        root_chunks = np.sqrt(parallel_chunks).astype(int)
+        dask_array = da.from_array(red_arr, chunks=tuple(x // root_chunks for x in red_arr.shape))
+        result = dask_array.map_blocks(select_and_flatten_largest_points, int(pop_target), 5, 100)
+        with ProgressBar():
+            bin_arr = result.compute()
+
     save_data(cache_path, bin_arr)
 
     return bin_arr

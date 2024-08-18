@@ -1,7 +1,7 @@
 import numpy as np
 from tqdm import tqdm
 
-from .neighbours import apply_nbhood_gens, growing_nb_wrapper, nb_flatten, nb_slide
+from .neighbours import apply_nbhood_gens, growing_nb_wrapper, nb_flatten2, nb_slide
 
 
 def get_coordinate_ordering(arr):
@@ -33,15 +33,17 @@ def select_largest_points(arr, target):
     return out
 
 
-def select_and_flatten_largest_points(arr, target, no_reorder_before=5, reorder_after=100):
-    print("Running population data flattening algorithm")
+def select_and_flatten_largest_points(arr, target, no_reorder_before=5, reorder_after=100, progress_bar=False):
     out = np.zeros_like(arr, dtype=bool)
     out = map_na(arr, out)
     arr = arr.copy()
     num_points = int(np.nansum(arr) // target) + 1
     ordering = get_coordinate_ordering(arr)
     ip = 0
-    for _ in tqdm(range(num_points)):
+    iterator = range(num_points)
+    if progress_bar:
+        iterator = tqdm(iterator)
+    for _ in iterator:
         idx = (ordering[0][-1-ip], ordering[1][-1-ip])
         if ip >= no_reorder_before and arr[*idx] < target:
             percent_diff = int(100 * (target - arr[*idx]) / target)
@@ -53,7 +55,7 @@ def select_and_flatten_largest_points(arr, target, no_reorder_before=5, reorder_
             ip = 0
 
         out[*idx] = True
-        growing_nb_wrapper(nb_flatten, arr, idx[0], idx[1], target, 100, arr)
+        growing_nb_wrapper(nb_flatten2, arr, idx[0], idx[1], target, 100, arr)
         arr[*idx] = np.nan
         ip += 1
     return out

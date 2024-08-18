@@ -18,6 +18,8 @@ def main():
                         help="Downsample so longest axis is this long")
     parser.add_argument("--pop_target", type=int, default=1_000_000,
                         help="What population should each pixel represent?")
+    parser.add_argument("--parallel_chunks", type=int, default=None,
+                        help="Split array into this many chunks before calculation?")
     parser.add_argument("--force_rerun", action="store_true",
                         help="Ignore cached data and recreate map")
     parser.add_argument("--show", action="store_true",
@@ -31,7 +33,8 @@ def main():
         args.max_resolution,
         args.pop_target,
         slice_idx=args.slice_idx,
-        force_rerun=args.force_rerun
+        force_rerun=args.force_rerun,
+        parallel_chunks=args.parallel_chunks
     )
     plot_arr = np.nan_to_num(bin_arr, nan=-0.1)
     fig = plot_data(

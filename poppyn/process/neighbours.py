@@ -26,7 +26,7 @@ def nb_slide(nbhood, i, j, target):
 
 
 @njit
-def nb_flatten(nbhood, i, j, target):
+def nb_flatten1(nbhood, i, j, target):
     out = np.zeros_like(nbhood)
     if np.isnan(nbhood[i, j]):
         return out
@@ -43,7 +43,7 @@ def nb_flatten(nbhood, i, j, target):
 
 
 @njit
-def nb_flatten(nbhood, i, j, target):
+def nb_flatten2(nbhood, i, j, target):
     non_nan = (~np.isnan(nbhood)).astype(np.float32)
     nnsum = np.nansum(non_nan)
     diff_v = nbhood[i, j] - target

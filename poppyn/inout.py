@@ -6,7 +6,7 @@ import dask.array as da
 from dask.array.image import imread
 from tifffile import imsave
 
-from .statics import WORLD_FILE, WORLD_SLICES, WORLD_SIZE, AREA_FILE
+from .statics import WORLD_FILE, WORLD_SLICES, WORLD_SIZE, AREA_FILE, BAD_DATA_SLICES
 
 BASE_DIR = Path(__file__).parent.parent
 DEFAULT_DATA_DIR = BASE_DIR / "data"
@@ -19,18 +19,27 @@ def get_data_path(fn):
     return fn
 
 
+def clean_bad_data(darr):
+    for (y, x), override in BAD_DATA_SLICES:
+        darr[0, y[0]:y[1], x[0]:x[1]] = override
+    return darr
+
+
 def load_data(fn=WORLD_FILE, min_land_area=50_000, raw=False):
     path = get_data_path(fn)
     print(f"Reading data from [{path}]")
     darr = imread(str(path))
+    print(f"Raw data shape: {darr.shape}")
     if raw:
         return darr
     darr = da.where(darr < 0, np.nan, darr)
-    if fn == WORLD_FILE and min_land_area > 0:
-        area_path = get_data_path(AREA_FILE)
-        area = imread(str(area_path))
-        darr = da.where(da.isnan(area), np.nan, darr)
-        darr = da.where(area < min_land_area, np.nan, darr)
+    if fn == WORLD_FILE:
+        if min_land_area > 0:
+            area_path = get_data_path(AREA_FILE)
+            area = imread(str(area_path))
+            darr = da.where(da.isnan(area), np.nan, darr)
+            darr = da.where(area < min_land_area, np.nan, darr)
+        darr = clean_bad_data(darr)
     return darr.compute()[0]
 
 
@@ -85,11 +94,11 @@ def load_or_generate_slice(slice_name, idx=None):
 
 
 def get_cache_filename(cache_key):
-    return f"cache/processed/poppyn_{cache_key}.tif"
+    return f"cache/processed/poppyn_{cache_key}.v2.tif"
 
 
 def get_image_filename(cache_key):
-    return f"output/poppyn_{cache_key}.png"
+    return f"output/poppyn_{cache_key}.v2.png"
 
 
 def save_image(cache_key, fig):

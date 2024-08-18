@@ -20,3 +20,7 @@ WORLD_SLICES = {
     # Small
     "London": ((3800, 4000), (21490, 21690)),
 }
+
+BAD_DATA_SLICES = [
+    (((4738, 4810), (24755, 24969)), 10)  # weird issue in dataset in south of Romania
+]
