@@ -24,11 +24,11 @@ def create_binary_population_map(slice_name, max_resolution, pop_target, slice_i
 
     print("Running population data flattening algorithm")
     if parallel_chunks is None:
-        bin_arr = select_and_flatten_largest_points(red_arr, int(pop_target), 5, 100)
+        bin_arr = select_and_flatten_largest_points(red_arr, int(pop_target), progress_bar=True)
     else:
         root_chunks = np.sqrt(parallel_chunks).astype(int)
         dask_array = da.from_array(red_arr, chunks=tuple(x // root_chunks for x in red_arr.shape))
-        result = dask_array.map_blocks(select_and_flatten_largest_points, int(pop_target), 5, 100)
+        result = dask_array.map_blocks(select_and_flatten_largest_points, int(pop_target))
         with ProgressBar():
             bin_arr = result.compute()
 
