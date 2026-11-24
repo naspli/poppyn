@@ -1,0 +1,23 @@
+[workspace]
+name = "poppyn"
+channels = ["https://conda.modular.com/max/", "conda-forge"]
+platforms = [
+    { platform = "osx-arm64", macos = "15.0" },
+    { platform = "linux-64", glibc = "2.34" },
+    { platform = "linux-aarch64", glibc = "2.34" },
+]
+
+[dependencies]
+python = "3.14.*"
+numpy = ">=2,<3"
+tifffile = ">=2026,<2027"
+imagecodecs = ">=2026,<2027"
+pillow = ">=13,<14"
+mojo = "==1.2.0"
+max = "==26.7.0"
+
+[tasks]
+generate = "python -B run_all.py"
+test = "python -B -m unittest discover -s tests -v"
+build-gpu = "mojo build poppyn/gpu/redistribute.mojo -o .pixi/poppyn-redistribute"
+verify-gpu = { cmd = "python -B tests/verify_gpu.py .pixi/poppyn-redistribute", depends-on = ["build-gpu"] }

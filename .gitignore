@@ -1,3 +1,7 @@
 .idea
-data/raw
-data/cache
+.pixi
+/data/raw
+/data/cache
+/data/output/v3
+*.py[cod]
+__pycache__/
