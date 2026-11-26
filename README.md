@@ -49,6 +49,18 @@ By default, this reads `data/raw/ppp_2020_1km_Aggregated.tif` and runs `.pixi/po
 
 `--width` sets the map width in pixels. The height follows the source window's aspect ratio. `--pop-target` sets how many people a bright pixel represents. The example writes `data/output/v3/world_7680_62500/poppyn-map.png`. Add `--annotated` to draw a translucent title, population scale and credits directly on that PNG.
 
+Downsampling shares each WorldPop cell's population among the output cells it overlaps, in proportion to the overlap in the raster grid. This assumes an even spread within each source cell and preserves the total population. An output cell is treated as land if it overlaps any valid source cell, including one with zero estimated population.
+
+### Optional projection
+
+Add `--projection equal-area` to use the cylindrical equal-area projection EPSG:6933. Poppyn selects the source window and applies any Romania correction in the original grid, then aggregates directly onto the projected grid before redistribution. The map height follows the projected aspect ratio, and each pixel covers the same ground area. The projection compresses north–south distances towards the poles. [Projection reference](https://nsidc.org/data/user-resources/help-center/guide-ease-grids)
+
+```sh
+pixi run --locked generate --width 7680 --pop-target 62500 --projection equal-area --annotated
+```
+
+This writes `data/output/v3/world_7680_62500_equal-area/poppyn-map.png`. The projection works with named and custom slices, raw heatmaps and tiles. Projected tile manifests and reports record the `crs` and `projectedBounds` in metres. The `bounds` field in tile manifests still gives the source window in longitude and latitude. `--projection geographic` is the default.
+
 ### Optional tiling
 
 Add `--tile-width 675` to write `tiles_675/` beside the full map. Split `0` starts at a map width of 675 pixels or the requested width if smaller. Each subsequent split doubles that width, with the last split using the exact requested width. Coarser maps represent proportionally more people per bright pixel based on the number of grid cells. Each split contains only image tiles, at `{split}/{column}/{row}.png`, and edge tiles can be smaller than 675 pixels. The manifest in `tiles_675/` records the geographic bounds, map sizes and population scale for each split. The caption is drawn on the full image.
