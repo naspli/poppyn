@@ -11,6 +11,8 @@ import numpy as np
 
 
 MASKED = -1.0
+STALL_PASSES = 4_096
+MIN_OVERFLOW_IMPROVEMENT = 0.0001  # In bright pixels' worth of people.
 
 
 def gather(grid, wrap_x=False):
@@ -65,14 +67,15 @@ def gpu_passes(grid, gpu, passes, wrap_x, temporary_dir):
 
 
 def settle(counts, land, people_per_mark, *, gpu=None, wrap_x=False,
-           batch_passes=256, max_passes=16_384, overflow_tolerance=0.20,
+           batch_passes=256, max_passes=None, overflow_tolerance=0.20,
            drift_tolerance=0.20, progress=None):
-    """Stop once residual overflow is small enough to allocate whole marks."""
+    """Spread until the excess is small enough, or until measurable progress stalls."""
     if (counts.ndim != 2 or counts.shape != land.shape or counts.size == 0
             or not np.isfinite(counts).all() or np.any(counts < 0)
             or np.any((~land) & (counts != 0)) or not 0 < people_per_mark < math.inf):
         raise ValueError("expected a finite non-negative population grid and a matching land mask")
-    if (batch_passes < 1 or max_passes < 0 or min(overflow_tolerance, drift_tolerance) < 0
+    if (batch_passes < 1 or (max_passes is not None and max_passes < 0)
+            or min(overflow_tolerance, drift_tolerance) < 0
             or not 0 <= overflow_tolerance + drift_tolerance < 0.5):
         raise ValueError("invalid pass limits or combined population tolerance; keep it below half a mark")
     target_mass = float(counts.sum(dtype=np.float64) / people_per_mark)
@@ -86,10 +89,12 @@ def settle(counts, land, people_per_mark, *, gpu=None, wrap_x=False,
                          "exceeding the allowed rounding error")
     mass = initial_mass
     passes = 0
+    progress_overflow = overflow
+    last_progress = 0
     start = monotonic()
     with TemporaryDirectory(prefix="poppyn-grid-") as directory:
-        while overflow > overflow_tolerance and passes < max_passes:
-            batch = min(batch_passes, max_passes - passes)
+        while overflow > overflow_tolerance and (max_passes is None or passes < max_passes):
+            batch = batch_passes if max_passes is None else min(batch_passes, max_passes - passes)
             if gpu:
                 grid = gpu_passes(grid, Path(gpu), batch, wrap_x, Path(directory))
                 if not np.isfinite(grid).all() or np.any(np.where(land, grid < 0, grid != MASKED)):
@@ -103,14 +108,22 @@ def settle(counts, land, people_per_mark, *, gpu=None, wrap_x=False,
                 progress(passes, overflow, mass - target_mass)
             if abs(mass - target_mass) > drift_tolerance:
                 break
+            # Keep the reference until reductions add up to a measurable improvement.
+            if progress_overflow - overflow >= MIN_OVERFLOW_IMPROVEMENT:
+                progress_overflow, last_progress = overflow, passes
+            elif passes - last_progress >= STALL_PASSES:
+                break
     if abs(mass - target_mass) > drift_tolerance:
         change = (mass - target_mass) * people_per_mark
         raise ValueError(f"the population total changed by {change:+,.2f} people after {passes:,} rounds, "
                          "exceeding the allowed rounding error")
     if overflow > overflow_tolerance:
-        raise ValueError(f"about {overflow * people_per_mark:,.2f} people are still above pixel capacity "
-                         f"after {passes:,} rounds. Check for an overfull land component such as an island, "
-                         "or try increasing --max-passes")
+        remaining = f"about {overflow * people_per_mark:,.2f} people still above pixel capacity"
+        if max_passes is not None and passes >= max_passes:
+            raise ValueError(f"reached the requested limit of {passes:,} rounds with {remaining}. "
+                             "Increase --max-passes or omit it to continue while excess population is falling.")
+        raise ValueError(f"excess population stalled for {passes - last_progress:,} rounds, with {remaining}. "
+                         "Check for an overfull land component such as an island, or use a finer grid.")
     return Settlement(grid, passes, monotonic() - start, overflow, mass - target_mass,
                       initial_mass - target_mass)
 

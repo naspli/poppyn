@@ -15,14 +15,15 @@ from tifffile import imwrite
 
 from poppyn.population import Bins, Level, correct_romania, levels_for_source, read_population
 from poppyn.prepare import generate
+from poppyn.projection import EQUAL_EARTH, equal_earth_parallel
 from poppyn.redistribution import gather, round_marks, settle
-from poppyn.render import annotate, binary_image, write_tiles
+from poppyn.render import OUTSIDE, WATER, annotate, binary_image, write_tiles
 
 
-def write_population_tiff(path, counts, nodata="-9999"):
+def write_population_tiff(path, counts, nodata="-9999", *, step=0.25, west=12, north=33):
     imwrite(path, counts, tile=(16, 16), metadata=None, extratags=[
-        (33550, "d", 3, (0.25, 0.25, 0), False),
-        (33922, "d", 6, (0, 0, 0, 12, 33, 0), False),
+        (33550, "d", 3, (step, step, 0), False),
+        (33922, "d", 6, (0, 0, 0, west, north, 0), False),
         (34735, "H", 16, (1, 1, 0, 3, 1024, 0, 1, 2, 1025, 0, 1, 1, 2048, 0, 1, 4326), False),
         (42113, "s", 0, nodata, False),
     ])
@@ -78,6 +79,34 @@ class PopulationTests(TestCase):
             np.testing.assert_array_equal(rows, [8, 9, 10])
             np.testing.assert_array_equal(columns, [5, 5, 5])
 
+    def test_equal_earth_matches_authors_reference_coordinates(self):
+        # Published WGS 84 example with a central meridian of 90° W.
+        latitude = 34 + 3 / 60 + 27.169 / 3600
+        longitude_delta = 90 - (117 + 11 / 60 + 48.349 / 3600)
+        northing, longitude_scale = equal_earth_parallel(latitude)
+        self.assertAlmostEqual(northing, 4_242_849.758, places=2)
+        self.assertAlmostEqual(longitude_delta * longitude_scale, -2_390_749.043, places=2)
+
+    def test_equal_earth_slice_includes_extra_population_across_antimeridian(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "population.tif"
+            values = np.full((16, 180), -9999, dtype=np.float32)
+            values[0, 179] = 100  # Within the original slice.
+            values[0, 0] = 50  # Included across the antimeridian.
+            values[0, 1] = 100  # Partially within the projected frame.
+            values[0, 5] = 1000  # Beyond the projected frame.
+            values[15, 179] = 1000  # Outside the latitude window.
+            write_population_tiff(source, values, step=2, west=-180, north=80)
+            options = {"slice_name": "fixture", "slice_window": (0, 14, 168, 180), "projection": EQUAL_EARTH}
+            levels = levels_for_source(source, 12, 100, tile_width=5, **options)
+            population = read_population(source, levels, **options)
+            self.assertEqual(population.bounds, (156, 52, 180, 80))
+            self.assertGreater(population.population, 150)
+            self.assertLess(population.population, 250)
+            for counts, land in population.grids:
+                self.assertAlmostEqual(counts.sum(), population.population)
+                self.assertFalse(counts[~land].any())
+
     def test_file_metadata_nodata_and_publish(self):
         with TemporaryDirectory() as directory:
             parent = Path(directory)
@@ -114,11 +143,11 @@ class PopulationTests(TestCase):
             raw[14:18, 14:19] = np.arange(1, 21).reshape(4, 5)
             raw[15, 15] = -9999
             write_population_tiff(source, raw)
-            with patch("poppyn.population.WORLD_SHAPE", raw.shape), \
-                    patch.dict("poppyn.population.WORLD_SLICES", {"fixture": (14, 18, 14, 19)}):
+            with patch.dict("poppyn.population.WORLD_SLICES", {"fixture": (15.55, 28.51, 16.74, 29.45)}):
                 population = read_population(source, [Level(2, 2, 50)], slice_name="fixture")
             counts, land = population.grids[0]
             self.assertEqual(population.bounds, (15.5, 28.5, 16.75, 29.5))
+            self.assertEqual(population.window, (14, 18, 14, 19))
             self.assertEqual(population.population, 203)
             np.testing.assert_array_equal(counts, [[14.5, 33.5], [71.5, 83.5]])
             self.assertTrue(land.all())
@@ -156,6 +185,27 @@ class PopulationTests(TestCase):
 
 
 class OutputTests(TestCase):
+    def test_equal_earth_world_distinguishes_outside_from_water(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "world.tif"
+            write_population_tiff(source, np.ones((24, 72), dtype=np.float32), step=5, west=-180, north=60)
+            levels = levels_for_source(source, 48, 100, tile_width=16, slice_name="world", slice_window=None,
+                                       projection=EQUAL_EARTH)
+            for raw in (False, True):
+                with self.subTest(raw=raw):
+                    output = root / ("raw" if raw else "binary")
+                    report = generate(source, output, levels, tile_width=16, projection=EQUAL_EARTH, raw=raw)
+                    self.assertAlmostEqual(report["sourcePopulation"], 1728)
+                    self.assertEqual(report["centralMeridian"], 0)
+                    self.assertAlmostEqual(report["levels"][-1]["aggregatedPopulation"], 1728)
+                    with Image.open(output / "poppyn-map.png") as image:
+                        colours = image.convert("RGB")
+                        self.assertEqual(colours.getpixel((0, 0)), OUTSIDE)
+                        self.assertEqual(colours.getpixel((image.width // 2, 0)), WATER)
+                    with Image.open(output / "tiles_16/2/0/0.png") as tile:
+                        self.assertEqual(tile.convert("RGB").getpixel((0, 0)), OUTSIDE)
+
     def test_cli_names_maps_by_width_and_includes_an_exact_maximum(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -316,8 +366,23 @@ class RedistributionTests(TestCase):
         with self.assertRaisesRegex(ValueError, "eligible cells cannot represent"):
             settle(counts, land, 1)
         counts[0, 2] = 1.75
-        with self.assertRaisesRegex(ValueError, "overfull land component"):
-            settle(counts, land, 1, batch_passes=1, max_passes=2)
+        with self.assertRaisesRegex(ValueError, "stalled.*overfull land component"):
+            settle(counts, land, 1)
+
+    def test_settlement_can_continue_past_an_explicit_pass_limit(self):
+        counts = np.zeros((1, 12))
+        counts[0, 6] = 5
+        land = np.ones(counts.shape, dtype=bool)
+        progress = []
+        with self.assertRaisesRegex(ValueError, "requested limit of 3 rounds"):
+            settle(counts, land, 1, batch_passes=2, max_passes=3,
+                   progress=lambda passes, overflow, drift: progress.append((passes, overflow)))
+        self.assertEqual(progress[-1][0], 3)
+        self.assertLess(progress[-1][1], progress[0][1])
+
+        result = settle(counts, land, 1, batch_passes=2)
+        self.assertGreater(result.passes, 3)
+        self.assertEqual(round_marks(result.grid, land, 5).sum(), 5)
 
     def test_spike_forms_one_translatable_filled_blob(self):
         grids = []
