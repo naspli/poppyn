@@ -62,20 +62,26 @@ def caption_font(size, bold=False):
     return ImageFont.load_default(size=size)
 
 
-def annotate(image, title, subtitle, details, bounds):
-    west, south, east, north = bounds
-    latitude = (south + north) / 2
-    half_pixel = (north - south) / (2 * image.height)
-    area = 6371**2 * math.radians((east - west) / image.width) * (
-        math.sin(math.radians(latitude + half_pixel)) - math.sin(math.radians(latitude - half_pixel))
-    )
+def annotate(image, title, subtitle, details, bounds, *, projected_bounds=None):
+    if projected_bounds is None:
+        west, south, east, north = bounds
+        latitude = (south + north) / 2
+        half_pixel = (north - south) / (2 * image.height)
+        area = 6371**2 * math.radians((east - west) / image.width) * (
+            math.sin(math.radians(latitude + half_pixel)) - math.sin(math.radians(latitude - half_pixel))
+        )
+        area_caption = f"Approx. {area:,.2f} km² per pixel at the map centre"
+    else:
+        west, south, east, north = projected_bounds
+        area = (east - west) * (north - south) / (image.width * image.height * 1e6)
+        area_caption = f"{area:,.2f} km² per pixel · Cylindrical equal-area"
     heading = [
         (title, 1, True, 150),
         (subtitle, 0.58, True, 140),
         *((line, 0.40, False, 125) for line in details),
     ]
     footer = [
-        (f"Approx. {area:,.2f} km² per pixel at the map centre", 0.34, False, 115),
+        (area_caption, 0.34, False, 115),
         ("WorldPop 2020 · DOI 10.5258/SOTON/WP00647 · CC BY 4.0", 0.34, False, 115),
         ("Poppyn by naspli.io · github.com/naspli/poppyn", 0.34, False, 115),
     ]

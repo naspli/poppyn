@@ -14,7 +14,7 @@ import numpy as np
 
 from .cache import ArrayCache, cache_key, file_digest
 from .output import catalogue_stage, publish_catalogue, write_json
-from .population import Population, levels_for_source, read_population
+from .population import EQUAL_AREA, EQUAL_AREA_CRS, GEOGRAPHIC, Population, equal_area_bounds, levels_for_source, read_population
 from .redistribution import child_blocks, round_marks, settle
 from .render import MAP_FILENAME, annotate, binary_image, heatmap_image, write_map, write_tiles
 from .statics import WORLD_SLICES
@@ -116,7 +116,8 @@ def solve_level(level, counts, land, wrap_x, cache, key, solver_options):
 
 
 def generate(source, output, levels, *, tile_width=None, romania_patch=True, slice_name="world", slice_window=None,
-             annotated=False, raw=False, cache_dir=None, force_rerun=False, report_path=None, **solver_options):
+             projection=GEOGRAPHIC, annotated=False, raw=False, cache_dir=None, force_rerun=False,
+             report_path=None, **solver_options):
     if slice_window is not None and (not slice_name or slice_name == "world"):
         raise ValueError("custom slices require a name")
     output = output.parent.resolve() / output.name
@@ -126,20 +127,20 @@ def generate(source, output, levels, *, tile_width=None, romania_patch=True, sli
             raise ValueError("report path must differ from the catalogue directory")
     with catalogue_stage(output, report_path, raw=raw) as staged:
         report = render_catalogue(staged, source, levels, tile_width, romania_patch, slice_name, slice_window,
-                                  annotated, raw, ArrayCache(cache_dir, force_rerun), solver_options)
+                                  projection, annotated, raw, ArrayCache(cache_dir, force_rerun), solver_options)
         publish_catalogue(staged, output, report, report_path)
         return report
 
 
-def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_name, slice_window, annotated, raw,
-                     cache, solver_options):
+def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_name, slice_window, projection,
+                     annotated, raw, cache, solver_options):
     start = monotonic()
     window = slice_window if slice_window is not None else WORLD_SLICES.get(slice_name)
     population_key = binary_key = ""
     if cache.directory is not None:
         code = Path(__file__).parent
         population_key = cache_key(
-            file_digest(source), window, slice_window is None and slice_name != "world", romania_patch,
+            file_digest(source), window, slice_window is None and slice_name != "world", romania_patch, projection,
             [level.metadata() for level in levels], np.__version__, version("tifffile"), version("imagecodecs"),
             file_digest(code / "population.py"), file_digest(code / "statics.py"), file_digest(Path(__file__)),
         )
@@ -149,7 +150,7 @@ def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_na
             binary_key = cache_key(population_key, options, file_digest(Path(gpu)) if gpu else "numpy",
                                    file_digest(code / "redistribution.py"))
     population = population_for_run(source, levels, cache, population_key, romania_patch=romania_patch,
-                                    slice_name=slice_name, slice_window=slice_window)
+                                    slice_name=slice_name, slice_window=slice_window, projection=projection)
     west, _, east, _ = population.bounds
     wrap_x = math.isclose(east - west, 360, abs_tol=0.0001)
     report = {
@@ -167,6 +168,12 @@ def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_na
               flush=True)
     tiles_directory = staged / f"tiles_{tile_width}"
     manifest = {"version": 3, "tileSize": tile_width, "bounds": population.bounds, "levels": []}
+    projected_bounds = None
+    if projection == EQUAL_AREA:
+        projected_bounds = equal_area_bounds(population.bounds)
+        projection_metadata = {"crs": EQUAL_AREA_CRS, "projectedBounds": projected_bounds}
+        manifest.update(projection_metadata)
+        report.update(projection_metadata)
     if raw:
         manifest.update(kind="raw", colourScale="log1p")
     name = area_title(slice_name) if slice_name != "world" else "the World"
@@ -195,7 +202,8 @@ def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_na
             manifest["levels"].append({"split": split, **metadata})
             print(f"Saved {tile_count:,} tiles for the {level.width:,}-pixel map.", flush=True)
         if split == len(levels) - 1:
-            cover = annotate(image, title, subtitle, lines, population.bounds) if annotated else image
+            cover = annotate(image, title, subtitle, lines, population.bounds,
+                             projected_bounds=projected_bounds) if annotated else image
             write_map(staged / MAP_FILENAME, cover, raw=raw)
         report["levels"].append({**metadata, **audit, "tiles": tile_count, "tileBytes": bytes_written})
     if tile_width is not None:
@@ -218,6 +226,8 @@ def main():
     parser.add_argument("--slice-idx", dest="slice_window", type=int, nargs=4,
                         metavar=("TOP", "BOTTOM", "LEFT", "RIGHT"), help="custom half-open source window")
     parser.add_argument("--width", "--max-width", type=int, required=True, help="width of the map in pixels")
+    parser.add_argument("--projection", choices=(GEOGRAPHIC, EQUAL_AREA), default=GEOGRAPHIC,
+                        help="map grid: WorldPop longitude/latitude or cylindrical equal-area (default: %(default)s)")
     parser.add_argument("--tile-width", type=int, help="also export tiles of this size at multiple zoom steps")
     parser.add_argument("--pop-target", type=int, required=True, help="people represented by one bright pixel")
     parser.add_argument("--romania-patch", action=argparse.BooleanOptionalAction, default=True,
@@ -255,7 +265,8 @@ def main():
     report_path = args.pop("report")
     if args["output"] is None:
         prefix = "raw_" if args["raw"] else ""
-        run_name = f"{prefix}{args['slice_name']}_{width}_{pop_target}"
+        suffix = f"_{EQUAL_AREA}" if args["projection"] == EQUAL_AREA else ""
+        run_name = f"{prefix}{args['slice_name']}_{width}_{pop_target}{suffix}"
         args["output"] = Path("data/output/v3") / run_name
 
     output = args["output"].parent.resolve() / args["output"].name
@@ -269,7 +280,8 @@ def main():
             raise ValueError(f"GPU executable is missing or not executable at {gpu}. "
                              "Run 'pixi run --locked build-gpu' to build the default, or use --cpu.")
         args["levels"] = levels_for_source(args["source"], width, pop_target, tile_width=tile_width,
-                                           slice_name=args["slice_name"], slice_window=window)
+                                           slice_name=args["slice_name"], slice_window=window,
+                                           projection=args["projection"])
         generate(**args, cache_dir=Path("data/cache/v3"), report_path=report_path)
     except (ValueError, OSError, CalledProcessError) as error:
         parser.exit(1, f"Generation failed for {output}\n{error}\n")

@@ -26,6 +26,33 @@ class Level:
 
 
 ROMANIA = (4_738, 4_810, 24_755, 24_969)
+GEOGRAPHIC = "geographic"
+EQUAL_AREA = "equal-area"
+EQUAL_AREA_CRS = "EPSG:6933"
+
+# WGS 84 ellipsoid and the 30° standard parallel of EPSG:6933.
+_SEMI_MAJOR_METRES = 6_378_137
+_FLATTENING = 1 / 298.257223563
+_ECCENTRICITY_SQUARED = _FLATTENING * (2 - _FLATTENING)
+_ECCENTRICITY = math.sqrt(_ECCENTRICITY_SQUARED)
+_SCALE = math.cos(math.radians(30)) / math.sqrt(1 - _ECCENTRICITY_SQUARED / 4)
+
+
+def equal_area_northing(latitude):
+    sine = np.sin(np.deg2rad(latitude))
+    q = (1 - _ECCENTRICITY_SQUARED) * (
+        sine / (1 - _ECCENTRICITY_SQUARED * sine**2)
+        + np.arctanh(_ECCENTRICITY * sine) / _ECCENTRICITY
+    )
+    return _SEMI_MAJOR_METRES * q / (2 * _SCALE)
+
+
+def equal_area_bounds(bounds):
+    west, south, east, north = bounds
+    # Preserve the source window's longitude interval, including its original seam.
+    metres_per_degree = _SEMI_MAJOR_METRES * _SCALE * math.pi / 180
+    return (west * metres_per_degree, float(equal_area_northing(south)),
+            east * metres_per_degree, float(equal_area_northing(north)))
 
 
 def source_window(source_shape, slice_name, slice_window):
@@ -42,14 +69,20 @@ def source_window(source_shape, slice_name, slice_window):
     return top, bottom, left, right
 
 
-def levels_for_source(source, max_width, pop_target, *, tile_width=None, slice_name, slice_window):
+def levels_for_source(source, max_width, pop_target, *, tile_width=None, slice_name, slice_window,
+                      projection=GEOGRAPHIC):
     if max_width < 1 or (tile_width is not None and tile_width < 1):
         raise ValueError("--width and --tile-width must be positive")
     if pop_target < 1:
         raise ValueError("--pop-target must be positive")
     with TiffFile(source) as tiff:
         page = tiff.pages[0]
-        top, bottom, left, right = source_window((page.imagelength, page.imagewidth), slice_name, slice_window)
+        window = source_window((page.imagelength, page.imagewidth), slice_name, slice_window)
+        top, bottom, left, right = window
+        ratio = Fraction(bottom - top, right - left)
+        if projection == EQUAL_AREA:
+            west, south, east, north = equal_area_bounds(window_bounds(page, raster_bounds(page), window))
+            ratio = (north - south) / (east - west)
     if max_width > right - left:
         raise ValueError(f"--width cannot exceed the selected source width of {right - left:,} pixels")
 
@@ -59,7 +92,7 @@ def levels_for_source(source, max_width, pop_target, *, tile_width=None, slice_n
         widths.append(width)
         width *= 2
     widths.append(max_width)
-    sizes = [(width, max(1, round(Fraction(width * (bottom - top), right - left)))) for width in widths]
+    sizes = [(width, max(1, round(width * ratio))) for width in widths]
     largest_width, largest_height = sizes[-1]
     population_scale = pop_target * largest_width * largest_height
     return [Level(width, height, round(Fraction(population_scale, width * height))) for width, height in sizes]
@@ -73,31 +106,54 @@ class Population:
     grids: list[tuple[np.ndarray, np.ndarray]]
 
 
+class AxisBins:
+    """Precompute the positive overlaps between two grids along one axis."""
+
+    def __init__(self, source_size, target_size, source_edges=None):
+        if source_edges is None:
+            # Use integer units so aligned boundaries are identical.
+            source_edges = np.arange(source_size + 1) * target_size
+            target_edges = np.arange(target_size + 1) * source_size
+        else:
+            target_edges = np.linspace(source_edges[0], source_edges[-1], target_size + 1)
+
+        # Each interval between successive edges lies in one source and one output cell.
+        edges = np.union1d(source_edges, target_edges)
+        self.source = np.searchsorted(source_edges, edges[:-1], side="right") - 1
+        self.target = np.searchsorted(target_edges, edges[:-1], side="right") - 1
+        self.weights = np.diff(edges) / np.diff(source_edges)[self.source]
+        self.offsets = np.searchsorted(self.source, np.arange(source_size + 1))
+
+    def sum(self, counts, land, start):
+        chunk = slice(self.offsets[start], self.offsets[start + counts.shape[0]])
+        source = self.source[chunk] - start
+        target = self.target[chunk]
+        starts = np.r_[0, np.flatnonzero(target[1:] != target[:-1]) + 1]
+        totals = np.add.reduceat(counts[source] * self.weights[chunk, None], starts, axis=0)
+        covered = np.logical_or.reduceat(land[source], starts, axis=0)
+        return totals, covered, slice(target[0], target[-1] + 1)
+
+
 class Bins:
-    def __init__(self, source_shape, target_shape):
+    def __init__(self, source_shape, target_shape, *, row_edges=None):
         height, width = source_shape
         target_height, target_width = target_shape
-        if not (0 < target_height <= height and 0 < target_width <= width):
+        if not (target_height > 0 and 0 < target_width <= width and (row_edges is not None or target_height <= height)):
             raise ValueError("display grid must fit inside the source grid")
-        self.rows = np.arange(height) * target_height // height
-        self.columns = np.arange(width) * target_width // width
+        self.rows = AxisBins(height, target_height, row_edges)
+        self.columns = AxisBins(width, target_width)
         self.counts = np.zeros(target_shape, dtype=np.float64)
         self.land = np.zeros(target_shape, dtype=bool)
 
     def add(self, values, valid, top, left):
-        height, width = values.shape
-        rows = self.rows[top:top + height]
-        columns = self.columns[left:left + width]
-        local_width = int(columns[-1] - columns[0] + 1)
-        local_height = int(rows[-1] - rows[0] + 1)
-        size = local_width * local_height
-        pixel_rows, pixel_columns = valid.nonzero()
-        bins = ((rows[pixel_rows] - rows[0]) * local_width
-                + columns[pixel_columns] - columns[0])
-        offsets = np.s_[rows[0]:rows[-1] + 1, columns[0]:columns[-1] + 1]
-        counts = np.bincount(bins, weights=values[valid], minlength=size)
-        self.counts[offsets] += counts.reshape(local_height, local_width)
-        self.land[offsets] |= np.bincount(bins, minlength=size).reshape(local_height, local_width) > 0
+        counts = np.zeros(values.shape, dtype=np.float64)
+        np.copyto(counts, values, where=valid)
+
+        # Separable weights give each output cell its share of the overlap area.
+        counts, land, rows = self.rows.sum(counts, valid, top)
+        counts, land, columns = self.columns.sum(counts.T, land.T, left)
+        self.counts[rows, columns] += counts.T
+        self.land[rows, columns] |= land.T
 
 
 def raster_bounds(page):
@@ -121,6 +177,15 @@ def raster_bounds(page):
     return west, south, east, north
 
 
+def window_bounds(page, bounds, window):
+    top, bottom, left, right = window
+    west, south, east, north = bounds
+    scale_x = (east - west) / page.imagewidth
+    scale_y = (north - south) / page.imagelength
+    return (west + left * scale_x, north - bottom * scale_y,
+            west + right * scale_x, north - top * scale_y)
+
+
 def correct_romania(values, valid, top, left):
     first_row, last_row, first_column, last_column = ROMANIA
     height, width = values.shape
@@ -141,7 +206,7 @@ def correct_romania(values, valid, top, left):
 
 
 def read_population(source: Path, levels: list[Level], romania_patch=True, *,
-                    slice_name="world", slice_window=None):
+                    slice_name="world", slice_window=None, projection=GEOGRAPHIC):
     """Stream decoded TIFF tiles once and reduce each requested level directly."""
     with TiffFile(source) as tiff:
         page = tiff.pages[0]
@@ -153,17 +218,16 @@ def read_population(source: Path, levels: list[Level], romania_patch=True, *,
             math.isclose(value, expected, rel_tol=0, abs_tol=1e-6)
             for value, expected in zip(bounds, WORLD_BOUNDS)
         )
-        first_row, last_row, first_column, last_column = source_window(
-            (page.imagelength, page.imagewidth), slice_name, slice_window
-        )
+        window = source_window((page.imagelength, page.imagewidth), slice_name, slice_window)
+        first_row, last_row, first_column, last_column = window
         if slice_window is not None or slice_name != "world":
-            west, south, east, north = bounds
-            scale_x = (east - west) / page.imagewidth
-            scale_y = (north - south) / page.imagelength
-            bounds = (west + first_column * scale_x, north - last_row * scale_y,
-                      west + last_column * scale_x, north - first_row * scale_y)
+            bounds = window_bounds(page, bounds, window)
         source_shape = (last_row - first_row, last_column - first_column)
-        accumulators = [Bins(source_shape, (level.height, level.width)) for level in levels]
+        row_edges = None
+        if projection == EQUAL_AREA:
+            latitudes = np.linspace(bounds[3], bounds[1], source_shape[0] + 1)
+            row_edges = -equal_area_northing(latitudes)  # Rows run from north to south.
+        accumulators = [Bins(source_shape, (level.height, level.width), row_edges=row_edges) for level in levels]
         # Decode at raster precision because tifffile can reject WorldPop's float32 minimum.
         no_data = page.dtype.type(page.tags["GDAL_NODATA"].value.replace(",", "."))
         source_total = 0.0

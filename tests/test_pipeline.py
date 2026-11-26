@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image
 from tifffile import imwrite
 
-from poppyn.population import Bins, Level, correct_romania, read_population
+from poppyn.population import Bins, Level, correct_romania, levels_for_source, read_population
 from poppyn.prepare import generate
 from poppyn.redistribution import gather, round_marks, settle
 from poppyn.render import annotate, binary_image, write_tiles
@@ -37,6 +37,46 @@ class PopulationTests(TestCase):
         bins.add(values[1:], np.ones((3, 4), dtype=bool), 1, 0)
         np.testing.assert_array_equal(bins.counts, [[14, 22], [46, 54]])
         self.assertEqual(bins.counts.sum(), values.sum())
+
+    def test_uniform_population_stays_uniform_at_fractional_scale(self):
+        values = np.full((7, 5), 6, dtype=np.float32)
+        bins = Bins(values.shape, (3, 2))
+        # Both chunk boundaries follow source cells shared by adjacent output cells.
+        for top, bottom in ((0, 3), (3, 7)):
+            for left, right in ((0, 3), (3, 5)):
+                chunk = values[top:bottom, left:right]
+                bins.add(chunk, np.ones(chunk.shape, dtype=bool), top, left)
+        np.testing.assert_allclose(bins.counts, np.full((3, 2), 35), rtol=0, atol=1e-12)
+        self.assertAlmostEqual(bins.counts.sum(), values.sum())
+        self.assertTrue(bins.land.all())
+
+    def test_centred_source_cell_shares_equally_across_four_output_cells(self):
+        values = np.full((5, 5), -9999, dtype=np.float32)
+        for population in (0, 40):
+            with self.subTest(population=population):
+                values[2, 2] = population
+                bins = Bins(values.shape, (2, 2))
+                bins.add(values, values >= 0, 0, 0)
+                np.testing.assert_array_equal(bins.counts, np.full((2, 2), population / 4))
+                self.assertTrue(bins.land.all())
+
+    def test_equal_area_regridding_preserves_population_and_nodata(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "population.tif"
+            values = np.full((16, 16), -9999, dtype=np.float32)
+            values[:, 5] = 0
+            values[8, 5] = 400
+            write_population_tiff(source, values)
+            levels = levels_for_source(source, 16, 200, slice_name="world", slice_window=None,
+                                       projection="equal-area")
+            counts, land = read_population(source, levels, projection="equal-area").grids[0]
+            self.assertEqual(counts.shape, (18, 16))
+            self.assertAlmostEqual(counts.sum(), 400)
+            np.testing.assert_array_equal(np.flatnonzero(land.any(axis=0)), [5])
+            self.assertTrue(land[:, 5].all())
+            rows, columns = counts.nonzero()
+            np.testing.assert_array_equal(rows, [8, 9, 10])
+            np.testing.assert_array_equal(columns, [5, 5, 5])
 
     def test_file_metadata_nodata_and_publish(self):
         with TemporaryDirectory() as directory:
@@ -80,7 +120,7 @@ class PopulationTests(TestCase):
             counts, land = population.grids[0]
             self.assertEqual(population.bounds, (15.5, 28.5, 16.75, 29.5))
             self.assertEqual(population.population, 203)
-            np.testing.assert_array_equal(counts, [[20, 28], [87, 68]])
+            np.testing.assert_array_equal(counts, [[14.5, 33.5], [71.5, 83.5]])
             self.assertTrue(land.all())
 
     def test_romania_correction_is_enabled_by_default_with_absolute_slice_indices(self):
@@ -163,6 +203,21 @@ class OutputTests(TestCase):
             self.assertEqual(raw_manifest["kind"], "raw")
 
             original_map = map_path.read_bytes()
+            report = root / "projected.json"
+            result = subprocess.run([*command, "--cpu", "--projection", "equal-area", "--report", str(report)],
+                                    cwd=root, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            projected = output.parent / "test-region_9_100_equal-area"
+            with Image.open(projected / "poppyn-map.png") as image:
+                self.assertEqual(image.size, (9, 7))
+            projected_manifest = json.loads((projected / "tiles_4/manifest.json").read_text())
+            self.assertEqual(projected_manifest["crs"], "EPSG:6933")
+            self.assertEqual(projected_manifest["bounds"], manifest["bounds"])
+            projected_report = json.loads(report.read_text())
+            self.assertAlmostEqual(projected_report["levels"][-1]["aggregatedPopulation"], 54)
+            self.assertEqual(projected_report["levels"][-1]["marks"], 1)
+            self.assertEqual(map_path.read_bytes(), original_map)
+
             result = subprocess.run([*command, "--raw", str(source), str(output)],
                                     cwd=root, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
