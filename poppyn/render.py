@@ -1,6 +1,7 @@
 """Render pixel-exact maps, tiles and optional captions."""
 
 import math
+from textwrap import wrap
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
@@ -9,28 +10,39 @@ from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
 WATER = (10, 16, 18)
 LAND = (25, 42, 45)
 MARK = (255, 246, 228)
+OUTSIDE = (33, 33, 39)
 MAP_FILENAME = "poppyn-map.png"
 HEAT_COLOURS = np.array([LAND, (23, 101, 103), (69, 169, 143), (225, 155, 83), MARK])
 
 
-def binary_image(land, marks):
-    image = Image.fromarray(np.where(marks, 2, land).astype(np.uint8))
-    image.putpalette((*WATER, *LAND, *MARK))
+def binary_image(land, marks, *, outside=None):
+    pixels = np.where(marks, 2, land).astype(np.uint8)
+    palette = (*WATER, *LAND, *MARK)
+    if outside is not None:
+        pixels[outside] = 3
+        palette += OUTSIDE
+    image = Image.fromarray(pixels)
+    image.putpalette(palette)
     return image
 
 
-def heatmap_image(counts, land):
+def heatmap_image(counts, land, *, outside=None):
     maximum = float(counts.max())
     intensities = np.log1p(counts)
+    steps = 255 if outside is None else 254
     if maximum:
         intensities /= math.log1p(maximum)
-        intensities *= 254
+        intensities *= steps - 1
     pixels = np.where(land, 1 + np.rint(intensities), 0).astype(np.uint8)
     colours = np.linspace(0, 1, len(HEAT_COLOURS))
-    samples = np.linspace(0, 1, 255)
+    samples = np.linspace(0, 1, steps)
     gradient = np.column_stack([np.interp(samples, colours, channel) for channel in HEAT_COLOURS.T])
+    palette = [*WATER, *np.rint(gradient).astype(np.uint8).ravel()]
+    if outside is not None:
+        pixels[outside] = 255
+        palette.extend(OUTSIDE)
     image = Image.fromarray(pixels)
-    image.putpalette((*WATER, *np.rint(gradient).astype(np.uint8).ravel().tolist()))
+    image.putpalette(palette)
     return image, maximum
 
 
@@ -62,7 +74,8 @@ def caption_font(size, bold=False):
     return ImageFont.load_default(size=size)
 
 
-def annotate(image, title, subtitle, details, bounds, *, projected_bounds=None):
+def annotate(image, title, subtitle, details, bounds, *, projected_bounds=None,
+             projection_name="Cylindrical equal-area"):
     if projected_bounds is None:
         west, south, east, north = bounds
         latitude = (south + north) / 2
@@ -74,19 +87,20 @@ def annotate(image, title, subtitle, details, bounds, *, projected_bounds=None):
     else:
         west, south, east, north = projected_bounds
         area = (east - west) * (north - south) / (image.width * image.height * 1e6)
-        area_caption = f"{area:,.2f} km² per pixel · Cylindrical equal-area"
+        area_caption = f"{area:,.2f} km² per pixel · {projection_name}"
     heading = [
         (title, 1, True, 150),
         (subtitle, 0.58, True, 140),
-        *((line, 0.40, False, 125) for line in details),
+        *((text, 0.40, False, 125) for text in details),
     ]
-    footer = [
-        (area_caption, 0.34, False, 115),
-        ("WorldPop 2020 · DOI 10.5258/SOTON/WP00647 · CC BY 4.0", 0.34, False, 115),
-        ("Poppyn by naspli.io · github.com/naspli/poppyn", 0.34, False, 115),
-    ]
+    credits = (
+        area_caption,
+        "WorldPop 2020 DOI 10.5258/SOTON/WP00647 · CC BY 4.0",
+        "Poppyn by naspli.io · github.com/naspli/poppyn",
+    )
+    footer = [(line, 0.34, False, 115) for line in credits]
     padding = max(2, round(min(image.width / 60, image.height / 22)))
-    size = max(1, round(min(image.width / 48, image.height / 8)))
+    size = max(1, round(min(image.width / 72, image.height / 12)))
     overlay = Image.new("RGBA", image.size)
     draw = ImageDraw.Draw(overlay)
     while size >= 1:

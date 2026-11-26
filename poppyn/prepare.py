@@ -14,7 +14,8 @@ import numpy as np
 
 from .cache import ArrayCache, cache_key, file_digest
 from .output import catalogue_stage, publish_catalogue, write_json
-from .population import EQUAL_AREA, EQUAL_AREA_CRS, GEOGRAPHIC, Population, equal_area_bounds, levels_for_source, read_population
+from .population import Population, levels_for_source, read_population
+from .projection import EQUAL_AREA, EQUAL_AREA_CRS, EQUAL_EARTH, GEOGRAPHIC, EqualEarth, equal_area_bounds
 from .redistribution import child_blocks, round_marks, settle
 from .render import MAP_FILENAME, annotate, binary_image, heatmap_image, write_map, write_tiles
 from .statics import WORLD_SLICES
@@ -22,7 +23,10 @@ from .statics import WORLD_SLICES
 
 DEFAULT_SOURCE = Path("data/raw/ppp_2020_1km_Aggregated.tif")
 DEFAULT_GPU = Path(".pixi/poppyn-redistribute")
-SLICE_TITLES = {"us": "US", "useastcoast": "US East Coast", "fareast": "Far East", "eastasia": "East Asia"}
+SLICE_TITLES = {
+    "us": "US", "useastcoast": "US East Coast", "us-west": "US West", "fareast": "Far East", "eastasia": "East Asia",
+    "central-america-caribbean": "Central America and the Caribbean", "kanto": "Kantō",
+}
 
 
 def area_title(name):
@@ -61,14 +65,15 @@ def population_for_run(source, levels, cache, key, **reader_options):
     cached = cache.load(f"population-{key}", "metadata", *fields)
     if cached is not None:
         metadata, *arrays = cached
-        bounds, total, correction = json.loads(metadata.item())
+        bounds, total, correction, window = json.loads(metadata.item())
         print("Reusing population estimates from an earlier run.", flush=True)
-        return Population(tuple(bounds), total, correction, list(zip(arrays[::2], arrays[1::2])))
+        return Population(tuple(bounds), total, correction, list(zip(arrays[::2], arrays[1::2])), tuple(window))
 
     print("Reading WorldPop estimates and grouping them into map pixels.", flush=True)
     population = read_population(source, levels, **reader_options)
     cache.save(f"population-{key}",
-               metadata=np.array(json.dumps([population.bounds, population.population, population.correction])),
+               metadata=np.array(json.dumps([population.bounds, population.population, population.correction,
+                                             population.window])),
                **dict(zip(fields, (array for grid in population.grids for array in grid))))
     return population
 
@@ -135,14 +140,15 @@ def generate(source, output, levels, *, tile_width=None, romania_patch=True, sli
 def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_name, slice_window, projection,
                      annotated, raw, cache, solver_options):
     start = monotonic()
-    window = slice_window if slice_window is not None else WORLD_SLICES.get(slice_name)
+    region_bounds = WORLD_SLICES.get(slice_name)
     population_key = binary_key = ""
     if cache.directory is not None:
         code = Path(__file__).parent
         population_key = cache_key(
-            file_digest(source), window, slice_window is None and slice_name != "world", romania_patch, projection,
+            file_digest(source), slice_window, region_bounds, romania_patch, projection,
             [level.metadata() for level in levels], np.__version__, version("tifffile"), version("imagecodecs"),
-            file_digest(code / "population.py"), file_digest(code / "statics.py"), file_digest(Path(__file__)),
+            file_digest(code / "population.py"), file_digest(code / "projection.py"),
+            file_digest(code / "statics.py"), file_digest(Path(__file__)),
         )
         if not raw:
             options = solver_options.copy()
@@ -152,10 +158,11 @@ def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_na
     population = population_for_run(source, levels, cache, population_key, romania_patch=romania_patch,
                                     slice_name=slice_name, slice_window=slice_window, projection=projection)
     west, _, east, _ = population.bounds
-    wrap_x = math.isclose(east - west, 360, abs_tol=0.0001)
+    earth = EqualEarth(population.bounds, world=slice_name == "world") if projection == EQUAL_EARTH else None
+    wrap_x = earth is None and math.isclose(east - west, 360, abs_tol=0.0001)
     report = {
         "slice": slice_name,
-        "sourceWindow": window,
+        "sourceWindow": None if slice_window is None and slice_name == "world" else population.window,
         "sourcePopulation": population.population,
         "romaniaCorrectionPeople": population.correction,
         "aggregationSeconds": monotonic() - start,
@@ -168,33 +175,41 @@ def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_na
               flush=True)
     tiles_directory = staged / f"tiles_{tile_width}"
     manifest = {"version": 3, "tileSize": tile_width, "bounds": population.bounds, "levels": []}
-    projected_bounds = None
+    projection_metadata = {}
     if projection == EQUAL_AREA:
-        projected_bounds = equal_area_bounds(population.bounds)
-        projection_metadata = {"crs": EQUAL_AREA_CRS, "projectedBounds": projected_bounds}
-        manifest.update(projection_metadata)
-        report.update(projection_metadata)
+        projection_metadata = {"crs": EQUAL_AREA_CRS, "projectedBounds": equal_area_bounds(population.bounds)}
+    elif earth is not None:
+        projection_metadata = earth.metadata()
+    manifest.update(projection_metadata)
+    report.update(projection_metadata)
     if raw:
         manifest.update(kind="raw", colourScale="log1p")
     name = area_title(slice_name) if slice_name != "world" else "the World"
-    title = "Human Life, Pixel by Pixel"
+
     for split, (level, (counts, land)) in enumerate(zip(levels, population.grids)):
         metadata = level.metadata()
+        outside = None if earth is None else earth.outside(level.width, level.height) & ~land
         if raw:
             print(f"Colouring the {level.width:,} by {level.height:,} map by estimated population.", flush=True)
-            image, maximum = heatmap_image(counts, land)
+            image, maximum = heatmap_image(counts, land, outside=outside)
             metadata.pop("peoplePerMark")
             metadata["maxPeoplePerPixel"] = maximum
             audit = {"aggregatedPopulation": float(counts.sum(dtype=np.float64))}
-            subtitle = f"WorldPop population estimates · {name}"
+            title = f"Raw Population Heatmap: {name}"
+            subtitle = f"WorldPop population estimates"
             lines = [f"Log scale from 0 to {maximum:,.1f} people per pixel."]
         else:
             marks, audit = solve_level(level, counts, land, wrap_x, cache,
                                        cache_key(binary_key, level.width), solver_options)
-            image = binary_image(land, marks)
-            subtitle = f"One pixel for every {level.people_per_mark:,} people · {name}"
-            lines = [f"{audit['marks']:,} bright pixels represent approximate locations of {audit['peopleRepresented']:,} people.",
-                     "A diffusion algorithm spreads out dense areas and joins sparse areas to a single representative pixel."]
+            image = binary_image(land, marks, outside=outside)
+            title = f"Life In Pixels: {name}"
+            subtitle = f"One pixel for every {level.people_per_mark:,} people"
+            lines = [
+                f"{audit['peopleRepresented']:,} people are represented.",
+                f"{audit['marks']:,} white pixels are placed at their approximate locations.",
+                "A diffusion algorithm spreads out dense areas and joins sparse areas to",
+                "a single representative pixel."
+            ]
         tile_count = bytes_written = 0
         if tile_width is not None:
             tile_count, bytes_written = write_tiles(tiles_directory / str(split), image,
@@ -202,8 +217,11 @@ def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_na
             manifest["levels"].append({"split": split, **metadata})
             print(f"Saved {tile_count:,} tiles for the {level.width:,}-pixel map.", flush=True)
         if split == len(levels) - 1:
-            cover = annotate(image, title, subtitle, lines, population.bounds,
-                             projected_bounds=projected_bounds) if annotated else image
+            cover = image
+            if annotated:
+                cover = annotate(image, title, subtitle, lines, population.bounds,
+                                 projected_bounds=projection_metadata.get("projectedBounds"),
+                                 projection_name="Equal Earth" if earth is not None else "Cylindrical equal-area")
             write_map(staged / MAP_FILENAME, cover, raw=raw)
         report["levels"].append({**metadata, **audit, "tiles": tile_count, "tileBytes": bytes_written})
     if tile_width is not None:
@@ -226,8 +244,8 @@ def main():
     parser.add_argument("--slice-idx", dest="slice_window", type=int, nargs=4,
                         metavar=("TOP", "BOTTOM", "LEFT", "RIGHT"), help="custom half-open source window")
     parser.add_argument("--width", "--max-width", type=int, required=True, help="width of the map in pixels")
-    parser.add_argument("--projection", choices=(GEOGRAPHIC, EQUAL_AREA), default=GEOGRAPHIC,
-                        help="map grid: WorldPop longitude/latitude or cylindrical equal-area (default: %(default)s)")
+    parser.add_argument("--projection", choices=(GEOGRAPHIC, EQUAL_AREA, EQUAL_EARTH), default=GEOGRAPHIC,
+                        help="map grid (default: %(default)s)")
     parser.add_argument("--tile-width", type=int, help="also export tiles of this size at multiple zoom steps")
     parser.add_argument("--pop-target", type=int, required=True, help="people represented by one bright pixel")
     parser.add_argument("--romania-patch", action=argparse.BooleanOptionalAction, default=True,
@@ -236,7 +254,7 @@ def main():
     parser.add_argument("--raw", action="store_true", help="export a heatmap of the aggregated source population")
     parser.add_argument("--force-rerun", action="store_true", help="recompute and refresh cached data")
     parser.add_argument("--batch-passes", type=int, default=256)
-    parser.add_argument("--max-passes", type=int, default=16_384)
+    parser.add_argument("--max-passes", type=int, help="optional hard limit on redistribution rounds")
     parser.add_argument("--overflow-tolerance", type=float, default=0.20,
                         help="allowed population above pixel capacity, in bright pixels' worth of people")
     parser.add_argument("--drift-tolerance", type=float, default=0.20,
@@ -265,7 +283,7 @@ def main():
     report_path = args.pop("report")
     if args["output"] is None:
         prefix = "raw_" if args["raw"] else ""
-        suffix = f"_{EQUAL_AREA}" if args["projection"] == EQUAL_AREA else ""
+        suffix = "" if args["projection"] == GEOGRAPHIC else f"_{args['projection']}"
         run_name = f"{prefix}{args['slice_name']}_{width}_{pop_target}{suffix}"
         args["output"] = Path("data/output/v3") / run_name
 

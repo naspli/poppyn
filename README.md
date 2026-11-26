@@ -61,15 +61,27 @@ pixi run --locked generate --width 7680 --pop-target 62500 --projection equal-ar
 
 This writes `data/output/v3/world_7680_62500_equal-area/poppyn-map.png`. The projection works with named and custom slices, raw heatmaps and tiles. Projected tile manifests and reports record the `crs` and `projectedBounds` in metres. The `bounds` field in tile manifests still gives the source window in longitude and latitude. `--projection geographic` is the default.
 
+Use `--projection equal-earth` for the curved Equal Earth outline. The world map extends to both poles, and the area beyond its outline has a separate background shade. Inside the outline, areas without valid WorldPop data use the water colour. Redistribution stops at the curved world seam. [Equal Earth reference](https://proj.org/en/stable/operations/projections/eqearth.html)
+
+```sh
+pixi run --locked generate --width 7680 --pop-target 62500 --projection equal-earth --annotated
+```
+
+This writes `data/output/v3/world_7680_62500_equal-earth/poppyn-map.png`. For a named or custom slice, Equal Earth uses the slice’s midpoint longitude as its central meridian. The output uses the smallest projected rectangle enclosing the slice. Population in the extra area, including across the antimeridian where applicable, enters the run. The report and tile manifest record the central meridian and projected extent. The report's `sourceWindow` gives the slice's source pixel indices before projection.
+
+Equal Earth divides each source row into two latitude bands and uses their mean projected width to approximate the curved cell edges. Each band retains its ground area, and the aggregate is checked against the population included in the projected frame at every resolution.
+
 ### Optional tiling
 
 Add `--tile-width 675` to write `tiles_675/` beside the full map. Split `0` starts at a map width of 675 pixels or the requested width if smaller. Each subsequent split doubles that width, with the last split using the exact requested width. Coarser maps represent proportionally more people per bright pixel based on the number of grid cells. Each split contains only image tiles, at `{split}/{column}/{row}.png`, and edge tiles can be smaller than 675 pixels. The manifest in `tiles_675/` records the geographic bounds, map sizes and population scale for each split. The caption is drawn on the full image.
 
 Pass an output directory after the GeoTIFF argument to choose another destination, and use `--report PATH` to save the audit separately. For a quick CPU run, use `--cpu --width 480 --pop-target 16000000`. The Romania correction is applied where the run overlaps the affected cells of the original WorldPop grid. Pass `--no-romania-patch` for the original estimates.
 
+Redistribution continues while excess population falls measurably. It stops successfully at the overflow tolerance and reports a stall if the excess falls by less than 0.0001 bright pixels' worth of population over at least 4,096 rounds. Use `--max-passes` to set a separate hard limit for a run.
+
 ### Named slices
 
-Use `--slice` with `europe`, `us`, `india`, `fareast`, `britain`, `useastcoast`, `japan`, `london` or `eastasia`. The original v2 windows and the East Asia window are defined in source raster coordinates. Poppyn selects the window before redistribution. Supply the desired map width for that window. [Slice definitions](poppyn/statics.py)
+Use `--slice` with a preset such as `europe`, `eastasia`, `south-america` or `nile-delta`. Run `pixi run --locked generate --help` for the full list. Presets use WGS 84 bounds in `(west, south, east, north)` order. Poppyn snaps those bounds outwards to source cell edges within the input raster. Supply the desired map width for the region. [Slice definitions](poppyn/statics.py)
 
 ```sh
 pixi run --locked generate --slice eastasia --width 727 --pop-target 62500
