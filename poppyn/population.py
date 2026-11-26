@@ -42,19 +42,19 @@ def source_window(source_shape, slice_name, slice_window):
     return top, bottom, left, right
 
 
-def levels_for_source(source, tile_width, max_width, pop_target, *, slice_name, slice_window):
-    if not 0 < tile_width <= max_width:
-        raise ValueError("require 0 < --tile-width <= --max-width")
+def levels_for_source(source, max_width, pop_target, *, tile_width=None, slice_name, slice_window):
+    if max_width < 1 or (tile_width is not None and tile_width < 1):
+        raise ValueError("--width and --tile-width must be positive")
     if pop_target < 1:
         raise ValueError("--pop-target must be positive")
     with TiffFile(source) as tiff:
         page = tiff.pages[0]
         top, bottom, left, right = source_window((page.imagelength, page.imagewidth), slice_name, slice_window)
     if max_width > right - left:
-        raise ValueError(f"--max-width cannot exceed the selected source width of {right - left:,} pixels")
+        raise ValueError(f"--width cannot exceed the selected source width of {right - left:,} pixels")
 
     widths = []
-    width = tile_width
+    width = tile_width or max_width
     while width < max_width:
         widths.append(width)
         width *= 2

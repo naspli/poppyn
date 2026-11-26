@@ -68,6 +68,7 @@ def main():
         directory = Path(tmp)
         for grid, passes, wrap in cases:
             result, _ = run_gpu(args.binary, grid, passes, wrap, directory)
+            np.testing.assert_array_equal(result < 0, grid < 0)
             expected = cpu_reference(grid, passes, wrap)
             np.testing.assert_allclose(result, expected, atol=2e-6, rtol=2e-6)
             np.testing.assert_allclose(mass(result), mass(grid), atol=1e-4, rtol=1e-6)
@@ -82,12 +83,13 @@ def main():
 
         source = directory / "overflow.f32"
         np.array([2.2e9, 2.2e9], dtype="<f4").tofile(source)
+        overflow_output = directory / "overflow-out.f32"
         failed = subprocess.run(
-            [args.binary, "2", "1", source, directory / "overflow-out.f32", "1"],
+            [args.binary, "2", "1", source, overflow_output, "1"],
             capture_output=True,
             text=True,
         )
-        assert failed.returncode and "Total grid mass" in failed.stderr, failed
+        assert failed.returncode and not overflow_output.exists(), failed
 
         if args.benchmark:
             grid = np.zeros((4333, 10000), dtype=np.float32)

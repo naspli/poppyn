@@ -58,7 +58,7 @@ def gpu_passes(grid, gpu, passes, wrap_x, temporary_dir):
     command = [str(gpu.resolve()), str(width), str(height), str(source), str(output), str(passes)]
     if wrap_x:
         command.append("--wrap-x")
-    subprocess.run(command, check=True)
+    subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
     if output.stat().st_size != grid.nbytes:
         raise ValueError("GPU returned a file with the wrong number of cells")
     return np.fromfile(output, dtype="<f4").reshape(grid.shape)
@@ -81,8 +81,9 @@ def settle(counts, land, people_per_mark, *, gpu=None, wrap_x=False,
     grid = np.where(land, counts / people_per_mark, MASKED).astype("<f4" if gpu else np.float64)
     initial_mass, overflow = measure(grid, land)
     if abs(initial_mass - target_mass) > drift_tolerance:
-        raise ValueError(f"converting the input grid exceeds the mass drift tolerance "
-                         f"({initial_mass - target_mass:+.6f} marks)")
+        change = (initial_mass - target_mass) * people_per_mark
+        raise ValueError(f"preparing the grid changed its population total by {change:+,.2f} people, "
+                         "exceeding the allowed rounding error")
     mass = initial_mass
     passes = 0
     start = monotonic()
@@ -103,13 +104,13 @@ def settle(counts, land, people_per_mark, *, gpu=None, wrap_x=False,
             if abs(mass - target_mass) > drift_tolerance:
                 break
     if abs(mass - target_mass) > drift_tolerance:
-        raise ValueError(f"population drift exceeds the tolerance after {passes:,} passes "
-                         f"({mass - target_mass:+.6f} marks)")
+        change = (mass - target_mass) * people_per_mark
+        raise ValueError(f"the population total changed by {change:+,.2f} people after {passes:,} rounds, "
+                         "exceeding the allowed rounding error")
     if overflow > overflow_tolerance:
-        blocked = float(np.max(grid, initial=0) - 1)
-        raise ValueError(f"overflow remains after {passes:,} passes ({overflow:.6f} marks total, "
-                         f"up to {blocked:.6f} in one cell); check for an overfull land component "
-                         "or allow more passes")
+        raise ValueError(f"about {overflow * people_per_mark:,.2f} people are still above pixel capacity "
+                         f"after {passes:,} rounds. Check for an overfull land component such as an island, "
+                         "or try increasing --max-passes")
     return Settlement(grid, passes, monotonic() - start, overflow, mass - target_mass,
                       initial_mass - target_mass)
 

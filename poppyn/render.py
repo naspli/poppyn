@@ -3,12 +3,13 @@
 import math
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
 
 
 WATER = (10, 16, 18)
 LAND = (25, 42, 45)
 MARK = (255, 246, 228)
+MAP_FILENAME = "poppyn-map.png"
 HEAT_COLOURS = np.array([LAND, (23, 101, 103), (69, 169, 143), (225, 155, 83), MARK])
 
 
@@ -33,17 +34,15 @@ def heatmap_image(counts, land):
     return image, maximum
 
 
-def write_level(output, level, image, *, tile_width, bits):
-    directory = output / str(level.width)
+def write_tiles(directory, image, *, tile_width, bits):
     directory.mkdir(parents=True)
-    image.save(directory / "map.png", bits=bits)
     tiles = 0
     byte_count = 0
-    for x, left in enumerate(range(0, level.width, tile_width)):
+    for x, left in enumerate(range(0, image.width, tile_width)):
         column = directory / str(x)
         column.mkdir()
-        for y, top in enumerate(range(0, level.height, tile_width)):
-            tile = image.crop((left, top, min(left + tile_width, level.width), min(top + tile_width, level.height)))
+        for y, top in enumerate(range(0, image.height, tile_width)):
+            tile = image.crop((left, top, min(left + tile_width, image.width), min(top + tile_width, image.height)))
             path = column / f"{y}.png"
             tile.save(path, bits=bits)
             tiles += 1
@@ -51,30 +50,62 @@ def write_level(output, level, image, *, tile_width, bits):
     return tiles, byte_count
 
 
-def write_annotation(path, image, title, lines, bounds):
+def caption_font(size, bold=False):
+    for name, index in (
+        ("/System/Library/Fonts/Avenir Next.ttc", 2 if bold else 7),
+        ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf", 0),
+    ):
+        try:
+            return ImageFont.truetype(name, size, index=index)
+        except OSError:
+            continue
+    return ImageFont.load_default(size=size)
+
+
+def annotate(image, title, subtitle, details, bounds):
     west, south, east, north = bounds
     latitude = (south + north) / 2
     half_pixel = (north - south) / (2 * image.height)
     area = 6371**2 * math.radians((east - west) / image.width) * (
         math.sin(math.radians(latitude + half_pixel)) - math.sin(math.radians(latitude - half_pixel))
     )
-    size = max(16, round(image.width / 75))
-    heading = ImageFont.load_default(size=size + size // 3)
-    body = ImageFont.load_default(size=size)
-    caption = [
-        (title, heading, MARK),
-        *((line, body, MARK) for line in lines),
-        (f"{image.width:,} by {image.height:,} pixels · about {area:,.2f} sq km per pixel at the map centre", body, MARK),
-        ("WorldPop 2020 · DOI 10.5258/SOTON/WP00647 · CC BY 4.0 · Poppyn by naspli", body, (182, 195, 190)),
+    heading = [
+        (title, 1, True, 150),
+        (subtitle, 0.58, True, 140),
+        *((line, 0.40, False, 125) for line in details),
     ]
-    padding = size
-    width = max(image.width, math.ceil(max(font.getlength(text) for text, font, _ in caption)) + 2 * padding)
-    row_heights = [math.ceil(font.size * 1.4) for _, font, _ in caption]
-    canvas = Image.new("RGB", (width, image.height + sum(row_heights) + 2 * padding), WATER)
-    canvas.paste(image.convert("RGB"), ((width - image.width) // 2, 0))
-    draw = ImageDraw.Draw(canvas)
-    y = image.height + padding
-    for (text, font, colour), height in zip(caption, row_heights):
-        draw.text((padding, y), text, font=font, fill=colour, anchor="lt")
-        y += height
-    canvas.save(path)
+    footer = [
+        (f"Approx. {area:,.2f} km² per pixel at the map centre", 0.34, False, 115),
+        ("WorldPop 2020 · DOI 10.5258/SOTON/WP00647 · CC BY 4.0", 0.34, False, 115),
+        ("Poppyn by naspli.io · github.com/naspli/poppyn", 0.34, False, 115),
+    ]
+    padding = max(2, round(min(image.width / 60, image.height / 22)))
+    size = max(1, round(min(image.width / 48, image.height / 8)))
+    overlay = Image.new("RGBA", image.size)
+    draw = ImageDraw.Draw(overlay)
+    while size >= 1:
+        rows = []
+        for text, scale, bold, alpha in heading + footer:
+            font = caption_font(max(1, round(size * scale)), bold)
+            box = draw.textbbox((0, 0), text, font=font, anchor="lt")
+            rows.append((text, font, alpha, box[2] - min(0, box[0]), max(box[3], round(font.size * 1.35))))
+        if (max(row[3] for row in rows) <= image.width - 2 * padding
+                and sum(row[4] for row in rows) + size <= image.height - 2 * padding):
+            break
+        size -= 1
+    else:
+        raise ValueError("map is too small for an on-map caption. Use a larger width or omit --annotated")
+
+    for block, y in ((rows[:len(heading)], padding),
+                     (rows[len(heading):], image.height - padding - sum(row[4] for row in rows[len(heading):]))):
+        for text, font, alpha, _, height in block:
+            draw.text((padding, y), text, font=font, fill=(*MARK, alpha), anchor="lt",
+                      stroke_width=max(1, font.size // 18), stroke_fill=(*WATER, 190))
+            y += height
+    return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+
+
+def write_map(path, image, *, raw):
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("poppyn-kind", "raw" if raw else "binary")
+    image.save(path, bits=8 if raw else 2, pnginfo=metadata)

@@ -14,9 +14,9 @@ from PIL import Image
 from tifffile import imwrite
 
 from poppyn.population import Bins, Level, correct_romania, read_population
-from poppyn.prepare import generate, pinholes
-from poppyn.redistribution import child_blocks, gather, round_marks, settle
-from poppyn.render import binary_image, write_level
+from poppyn.prepare import generate
+from poppyn.redistribution import gather, round_marks, settle
+from poppyn.render import annotate, binary_image, write_tiles
 
 
 def write_population_tiff(path, counts, nodata="-9999"):
@@ -55,12 +55,10 @@ class PopulationTests(TestCase):
             self.assertEqual(population.population, 40)
             np.testing.assert_array_equal(land, [[True, False], [False, True]])
             np.testing.assert_array_equal(counts, [[30, 0], [0, 10]])
-            generate(source, output, [level], tile_width=2)
-            manifest = json.loads((output / "manifest.json").read_text())
-            self.assertEqual(manifest["levels"], [level.metadata()])
-            with Image.open(output / "2/0/0.png") as tile, Image.open(output / "2/map.png") as image:
-                np.testing.assert_array_equal(np.array(tile), [[2, 0], [0, 1]])
-                np.testing.assert_array_equal(image, tile)
+            generate(source, output, [level])
+            self.assertEqual({path.name for path in output.iterdir()}, {"poppyn-map.png"})
+            with Image.open(output / "poppyn-map.png") as image:
+                np.testing.assert_array_equal(image, [[2, 0], [0, 1]])
 
     def test_romania_patch_keeps_original_mask(self):
         values = np.array([[15, -9999], [0, 25]], dtype=np.float32)
@@ -110,9 +108,9 @@ class PopulationTests(TestCase):
         land[-1, -1] = marks[-1, -1] = True
         with TemporaryDirectory() as directory:
             output = Path(directory)
-            count, _ = write_level(output, level, binary_image(land, marks), tile_width=512, bits=2)
+            count, _ = write_tiles(output / "0", binary_image(land, marks), tile_width=512, bits=2)
             self.assertEqual(count, 4)
-            with Image.open(output / "513/1/1.png") as image:
+            with Image.open(output / "0/1/1.png") as image:
                 self.assertEqual(image.size, (1, 3))
                 self.assertEqual(image.getpixel((0, 2)), 2)
 
@@ -127,57 +125,87 @@ class OutputTests(TestCase):
             script = Path(__file__).resolve().parents[1] / "run_all.py"
             command = [sys.executable, "-B", str(script),
                        "--slice", "Test Region", "--slice-idx", "1", "7", "1", "10",
-                       "--tile-width", "4", "--max-width", "9", "--pop-target", "100", "--annotated"]
+                       "--tile-width", "4", "--width", "9", "--pop-target", "100"]
             result = subprocess.run([*command, "--cpu"], cwd=root, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            output = root.resolve() / "data/output/v3/test-region_4_9_100/tiles"
-            self.assertIn(f"Maps published to {output}", result.stdout)
-            manifest = json.loads((output / "manifest.json").read_text())
-            self.assertEqual(manifest["version"], 2)
+            output = root.resolve() / "data/output/v3/test-region_9_100"
+            map_path = output / "poppyn-map.png"
+            with Image.open(map_path) as image:
+                self.assertEqual(image.size, (9, 6))
+                pixels = np.asarray(image.convert("RGB"))
+            tiles = output / "tiles_4"
+            manifest = json.loads((tiles / "manifest.json").read_text())
+            self.assertEqual(manifest["version"], 3)
             self.assertEqual(manifest["tileSize"], 4)
-            self.assertEqual(manifest["levels"], [Level(4, 3, 450).metadata(),
-                                                  Level(8, 5, 135).metadata(),
-                                                  Level(9, 6, 100).metadata()])
-            self.assertEqual({path.name for path in output.iterdir() if path.is_dir()}, {"4", "8", "9"})
-            self.assertTrue((output / "9/map-annotated.png").is_file())
-            with Image.open(output / "9/2/1.png") as tile:
-                self.assertEqual(tile.size, (1, 2))
+            self.assertEqual(
+                [(entry["split"], entry["width"], entry["height"], entry["peoplePerMark"])
+                 for entry in manifest["levels"]],
+                [(0, 4, 3, 450), (1, 8, 5, 135), (2, 9, 6, 100)],
+            )
+            self.assertEqual({path.name for path in tiles.iterdir() if path.is_dir()}, {"0", "1", "2"})
+            self.assertEqual(list(tiles.rglob("map*.png")), [])
+            covered = np.zeros(pixels.shape[:2], dtype=bool)
+            for path in (tiles / "2").glob("*/*.png"):
+                y, x = int(path.stem) * 4, int(path.parent.name) * 4
+                with Image.open(path) as tile:
+                    self.assertEqual(tile.size, (min(4, 9 - x), min(4, 6 - y)))
+                    window = np.s_[y:y + tile.height, x:x + tile.width]
+                    self.assertFalse(covered[window].any())
+                    np.testing.assert_array_equal(tile.convert("RGB"), pixels[window])
+                    covered[window] = True
+            self.assertTrue(covered.all())
 
             result = subprocess.run([*command, "--raw"], cwd=root, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            raw_run = output.parent.parent / "raw_test-region_4_9_100"
-            self.assertTrue((raw_run / "report.json").is_file())
-            self.assertTrue((raw_run / "tiles/9/map-annotated.png").is_file())
-            raw_manifest = json.loads((raw_run / "tiles/manifest.json").read_text())
+            raw_run = output.parent / "raw_test-region_9_100"
+            self.assertTrue((raw_run / "poppyn-map.png").is_file())
+            raw_manifest = json.loads((raw_run / "tiles_4/manifest.json").read_text())
             self.assertEqual(raw_manifest["kind"], "raw")
 
+            original_map = map_path.read_bytes()
             result = subprocess.run([*command, "--raw", str(source), str(output)],
                                     cwd=root, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("already contains binary maps", result.stderr)
-            self.assertEqual(json.loads((output / "manifest.json").read_text()), manifest)
+            self.assertEqual(map_path.read_bytes(), original_map)
+            self.assertEqual(json.loads((tiles / "manifest.json").read_text()), manifest)
 
-    def test_raw_map_tiles_and_annotation_share_the_same_heatmap(self):
+    def test_raw_map_and_tiles_share_the_same_heatmap(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "population.tif"
             output = root / "raw"
             write_population_tiff(source, np.array([[0, 1, 5], [-9999, 10, 100]], dtype=np.float32))
             with patch("poppyn.prepare.settle", side_effect=AssertionError("raw export ran the solver")):
-                generate(source, output, [Level(3, 2, 50)], tile_width=3, raw=True, annotated=True)
-            manifest = json.loads((output / "manifest.json").read_text())
+                generate(source, output, [Level(3, 2, 50)], tile_width=3, raw=True)
+            manifest = json.loads((output / "tiles_3/manifest.json").read_text())
             self.assertEqual(manifest["colourScale"], "log1p")
             self.assertEqual(manifest["levels"][0]["maxPeoplePerPixel"], 100)
-            with Image.open(output / "3/map.png") as image:
+            with Image.open(output / "poppyn-map.png") as image:
                 pixels = np.asarray(image)
                 self.assertEqual(pixels[1, 0], 0)
                 self.assertEqual(pixels[1, 2], 255)
                 self.assertEqual(np.unique(pixels).size, 6)
-                with Image.open(output / "3/0/0.png") as tile:
+                with Image.open(output / "tiles_3/0/0/0.png") as tile:
                     np.testing.assert_array_equal(image, tile)
-                with Image.open(output / "3/map-annotated.png") as captioned:
-                    offset = (captioned.width - image.width) // 2
-                    np.testing.assert_array_equal(captioned.crop((offset, 0, offset + 3, 2)), image.convert("RGB"))
+
+
+    def test_annotation_keeps_underlying_map_visible(self):
+        captions = ("World population", "One bright pixel per 62,500 people",
+                    ["Dense areas spread out and sparse populations share a pixel."],
+                    (-180, -72, 180, 84))
+        darker = annotate(Image.new("RGB", (480, 208), (0, 0, 0)), *captions)
+        lighter = annotate(Image.new("RGB", (480, 208), (80, 80, 80)), *captions)
+        self.assertEqual(darker.size, (480, 208))
+        self.assertEqual(lighter.size, darker.size)
+        dark_red = np.asarray(darker, dtype=int)[:, :, 0]
+        light_red = np.asarray(lighter, dtype=int)[:, :, 0]
+        title = dark_red[:50]
+        strongest_ink = title == title.max()
+        self.assertGreater(title.max(), 0)
+        # Even in the solid parts of the lettering, some background must show through.
+        self.assertTrue((light_red[:50][strongest_ink] > title[strongest_ink]).all())
+        self.assertTrue((light_red[:50][strongest_ink] - title[strongest_ink] < 80).all())
+        self.assertEqual(lighter.getpixel((240, 104)), (80, 80, 80))
 
     def test_cached_rerun_reuses_results_and_source_changes_invalidate_them(self):
         with TemporaryDirectory() as directory:
@@ -188,27 +216,24 @@ class OutputTests(TestCase):
             options = {"cache_dir": root / "cache", "tile_width": 2}
             write_population_tiff(source, np.full((2, 2), 5, dtype=np.float32))
             generate(source, output, levels, **options)
-            original_bytes = (output / "2/map.png").read_bytes()
+            original_bytes = (output / "poppyn-map.png").read_bytes()
             with patch("poppyn.prepare.read_population", side_effect=AssertionError("re-read source")), \
                     patch("poppyn.prepare.settle", side_effect=AssertionError("repeated settlement")):
-                generate(source, output, levels, annotated=True, **options)
-            self.assertEqual((output / "2/map.png").read_bytes(), original_bytes)
-            self.assertTrue((output / "2/map-annotated.png").is_file())
-            with patch("poppyn.prepare.read_population", wraps=read_population) as reader, \
-                    patch("poppyn.prepare.settle", wraps=settle) as solver:
-                generate(source, output, levels, force_rerun=True, **options)
-                reader.assert_called_once()
-                solver.assert_called_once()
+                generate(source, output, levels, **options)
+            self.assertEqual((output / "poppyn-map.png").read_bytes(), original_bytes)
+            report = generate(source, output, levels, force_rerun=True, **options)
+            self.assertFalse(report["levels"][0]["redistributionCacheHit"])
+            self.assertEqual((output / "poppyn-map.png").read_bytes(), original_bytes)
             write_population_tiff(source, np.full((2, 2), 10, dtype=np.float32))
             report = generate(source, output, levels, **options)
             self.assertEqual(report["levels"][0]["marks"], 2)
-            self.assertNotEqual((output / "2/map.png").read_bytes(), original_bytes)
+            self.assertNotEqual((output / "poppyn-map.png").read_bytes(), original_bytes)
 
-            latest_bytes = (output / "2/map.png").read_bytes()
+            latest_bytes = (output / "poppyn-map.png").read_bytes()
             write_population_tiff(source, np.full((2, 2), 15, dtype=np.float32))
             with self.assertRaises(FileNotFoundError):
                 generate(source, output, levels, report_path=root / "missing" / "report.json", **options)
-            self.assertEqual((output / "2/map.png").read_bytes(), latest_bytes)
+            self.assertEqual((output / "poppyn-map.png").read_bytes(), latest_bytes)
 
             unrelated = output / "notes.txt"
             unrelated.write_text("keep", encoding="utf-8")
@@ -221,15 +246,16 @@ class RedistributionTests(TestCase):
     def test_gather_reflects_at_land_mask_and_domain_edges(self):
         start = np.array([[4.0, 0], [-1, 0]])
         expected = np.array([[3.25, 0.75], [-1, 0]])
-        np.testing.assert_array_equal(gather(start), expected)
-        self.assertEqual(expected[expected >= 0].sum(), start[start >= 0].sum())
+        result = gather(start)
+        np.testing.assert_array_equal(result, expected)
+        self.assertEqual(result[result >= 0].sum(), start[start >= 0].sum())
 
     def test_gather_can_wrap_across_longitude(self):
         start = np.array([[3.0, 0, 0]])
         np.testing.assert_array_equal(gather(start), [[2.5, 0.5, 0]])
         np.testing.assert_array_equal(gather(start, wrap_x=True), [[2, 0.5, 0.5]])
 
-    def test_failed_island_convergence_does_not_publish(self):
+    def test_settlement_rejects_insufficient_global_or_island_capacity(self):
         counts = np.array([[0.0, 0, 3]])
         land = np.array([[True, False, True]])
         with self.assertRaisesRegex(ValueError, "eligible cells cannot represent"):
@@ -248,7 +274,8 @@ class RedistributionTests(TestCase):
             self.assertLess(abs(result.mass_drift), 1e-9)
             marks = round_marks(result.grid, land, 50)
             self.assertEqual(marks.sum(), 50)
-            self.assertEqual(pinholes(land, marks), 0)
+            neighbourhoods = np.lib.stride_tricks.sliding_window_view(marks, (3, 3))
+            self.assertFalse(((neighbourhoods.sum(axis=(2, 3)) == 8) & ~marks[1:-1, 1:-1]).any())
             grids.append(result.grid[row - 8:row + 9, col - 8:col + 9])
         np.testing.assert_allclose(*grids, rtol=0, atol=1e-10)
 
@@ -267,9 +294,13 @@ class RedistributionTests(TestCase):
         self.assertTrue(marks[2, 3])
         self.assertFalse(marks[3, 2])
         self.assertFalse(marks[2, 2])
-        while counts.shape != (1, 1):
-            counts, marks = (child_blocks(grid).sum(axis=(2, 3)) for grid in (counts, marks))
-            self.assertTrue(((marks >= np.floor(counts)) & (marks <= np.ceil(counts))).all())
+        height, width = counts.shape
+        for size in (2, 4, 8, 16, 32):
+            for y in range(0, height, size):
+                for x in range(0, width, size):
+                    window = np.s_[y:y + size, x:x + size]
+                    population = counts[window].sum()
+                    self.assertIn(marks[window].sum(), (math.floor(population), math.ceil(population)))
 
 
 if __name__ == "__main__":
