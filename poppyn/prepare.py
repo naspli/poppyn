@@ -12,6 +12,8 @@ from time import monotonic
 
 import numpy as np
 
+from . import lakes
+from .basemap import Basemap
 from .cache import ArrayCache, cache_key, file_digest
 from .output import catalogue_stage, publish_catalogue, write_json
 from .population import Population, levels_for_source, read_population
@@ -21,8 +23,12 @@ from .render import MAP_FILENAME, annotate, binary_image, heatmap_image, write_m
 from .statics import WORLD_SLICES
 
 
-DEFAULT_SOURCE = Path("data/raw/ppp_2020_1km_Aggregated.tif")
+DEFAULT_SOURCE = Path("data/raw/global_pop_2025_CN_1km_R2025A_v1.tif")
 DEFAULT_GPU = Path(".pixi/poppyn-redistribute")
+SOURCE_CREDITS = {
+    DEFAULT_SOURCE.name: "WorldPop Global2 (2025), R2025A v1 · DOI 10.5258/SOTON/WP00845 · CC BY 4.0",
+    "ppp_2020_1km_Aggregated.tif": "WorldPop 2020 DOI 10.5258/SOTON/WP00647 · CC BY 4.0",
+}
 SLICE_TITLES = {
     "us": "US", "useastcoast": "US East Coast", "us-west": "US West", "fareast": "Far East", "eastasia": "East Asia",
     "central-america-caribbean": "Central America and the Caribbean", "kanto": "Kantō",
@@ -65,14 +71,15 @@ def population_for_run(source, levels, cache, key, **reader_options):
     cached = cache.load(f"population-{key}", "metadata", *fields)
     if cached is not None:
         metadata, *arrays = cached
-        bounds, total, correction, window = json.loads(metadata.item())
+        bounds, total, lake_removed, window = json.loads(metadata.item())
         print("Reusing population estimates from an earlier run.", flush=True)
-        return Population(tuple(bounds), total, correction, list(zip(arrays[::2], arrays[1::2])), tuple(window))
+        return Population(tuple(bounds), total, lake_removed, list(zip(arrays[::2], arrays[1::2])),
+                          tuple(window))
 
     print("Reading WorldPop estimates and grouping them into map pixels.", flush=True)
     population = read_population(source, levels, **reader_options)
     cache.save(f"population-{key}",
-               metadata=np.array(json.dumps([population.bounds, population.population, population.correction,
+               metadata=np.array(json.dumps([population.bounds, population.population, population.lake_removed,
                                              population.window])),
                **dict(zip(fields, (array for grid in population.grids for array in grid))))
     return population
@@ -120,7 +127,7 @@ def solve_level(level, counts, land, wrap_x, cache, key, solver_options):
     return marks, audit
 
 
-def generate(source, output, levels, *, tile_width=None, romania_patch=True, slice_name="world", slice_window=None,
+def generate(source, output, levels, *, tile_width=None, slice_name="world", slice_window=None,
              projection=GEOGRAPHIC, annotated=False, raw=False, cache_dir=None, force_rerun=False,
              report_path=None, **solver_options):
     if slice_window is not None and (not slice_name or slice_name == "world"):
@@ -131,13 +138,13 @@ def generate(source, output, levels, *, tile_width=None, romania_patch=True, sli
         if report_path == output:
             raise ValueError("report path must differ from the catalogue directory")
     with catalogue_stage(output, report_path, raw=raw) as staged:
-        report = render_catalogue(staged, source, levels, tile_width, romania_patch, slice_name, slice_window,
+        report = render_catalogue(staged, source, levels, tile_width, slice_name, slice_window,
                                   projection, annotated, raw, ArrayCache(cache_dir, force_rerun), solver_options)
         publish_catalogue(staged, output, report, report_path)
         return report
 
 
-def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_name, slice_window, projection,
+def render_catalogue(staged, source, levels, tile_width, slice_name, slice_window, projection,
                      annotated, raw, cache, solver_options):
     start = monotonic()
     region_bounds = WORLD_SLICES.get(slice_name)
@@ -145,33 +152,36 @@ def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_na
     if cache.directory is not None:
         code = Path(__file__).parent
         population_key = cache_key(
-            file_digest(source), slice_window, region_bounds, romania_patch, projection,
+            file_digest(source), slice_window, region_bounds, projection,
             [level.metadata() for level in levels], np.__version__, version("tifffile"), version("imagecodecs"),
             file_digest(code / "population.py"), file_digest(code / "projection.py"),
             file_digest(code / "statics.py"), file_digest(Path(__file__)),
+            file_digest(Path(lakes.__file__)), file_digest(lakes.LAKES_PATH),
         )
         if not raw:
             options = solver_options.copy()
             gpu = options.pop("gpu", None)
             binary_key = cache_key(population_key, options, file_digest(Path(gpu)) if gpu else "numpy",
                                    file_digest(code / "redistribution.py"))
-    population = population_for_run(source, levels, cache, population_key, romania_patch=romania_patch,
-                                    slice_name=slice_name, slice_window=slice_window, projection=projection)
+    population = population_for_run(source, levels, cache, population_key, slice_name=slice_name,
+                                    slice_window=slice_window, projection=projection)
     west, _, east, _ = population.bounds
     earth = EqualEarth(population.bounds, world=slice_name == "world") if projection == EQUAL_EARTH else None
     wrap_x = earth is None and math.isclose(east - west, 360, abs_tol=0.0001)
     report = {
         "slice": slice_name,
+        "sourceFile": source.name,
         "sourceWindow": None if slice_window is None and slice_name == "world" else population.window,
         "sourcePopulation": population.population,
-        "romaniaCorrectionPeople": population.correction,
+        "lakePopulationRemovedPeople": population.lake_removed,
         "aggregationSeconds": monotonic() - start,
         "levels": [],
     }
-    print(f"Prepared estimates for about {population.population + population.correction:,.0f} people "
+    prepared_population = population.population - population.lake_removed
+    print(f"Prepared estimates for about {prepared_population:,.0f} people "
           f"in {report['aggregationSeconds']:.1f} seconds.", flush=True)
-    if population.correction:
-        print(f"The Romania correction changed the source estimate by {population.correction:+,.0f} people.",
+    if population.lake_removed:
+        print(f"The lake mask removed estimates for {population.lake_removed:,.2f} people in open water.",
               flush=True)
     tiles_directory = staged / f"tiles_{tile_width}"
     manifest = {"version": 3, "tileSize": tile_width, "bounds": population.bounds, "levels": []}
@@ -185,13 +195,16 @@ def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_na
     if raw:
         manifest.update(kind="raw", colourScale="log1p")
     name = area_title(slice_name) if slice_name != "world" else "the World"
+    basemap = Basemap(population.bounds, projection, earth)
 
     for split, (level, (counts, land)) in enumerate(zip(levels, population.grids)):
         metadata = level.metadata()
-        outside = None if earth is None else earth.outside(level.width, level.height) & ~land
+        display_land = basemap.land_mask(level.width, level.height)
+        display_land |= land
+        outside = None if earth is None else earth.outside(level.width, level.height) & ~display_land
         if raw:
             print(f"Colouring the {level.width:,} by {level.height:,} map by estimated population.", flush=True)
-            image, maximum = heatmap_image(counts, land, outside=outside)
+            image, maximum = heatmap_image(counts, display_land, outside=outside)
             metadata.pop("peoplePerMark")
             metadata["maxPeoplePerPixel"] = maximum
             audit = {"aggregatedPopulation": float(counts.sum(dtype=np.float64))}
@@ -201,14 +214,14 @@ def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_na
         else:
             marks, audit = solve_level(level, counts, land, wrap_x, cache,
                                        cache_key(binary_key, level.width), solver_options)
-            image = binary_image(land, marks, outside=outside)
-            title = f"Life In Pixels: {name}"
+            image = binary_image(display_land, marks, outside=outside)
+            title = f"People As Pixels: {name}"
             subtitle = f"One pixel for every {level.people_per_mark:,} people"
             lines = [
                 f"{audit['peopleRepresented']:,} people are represented.",
                 f"{audit['marks']:,} white pixels are placed at their approximate locations.",
-                "A diffusion algorithm spreads out dense areas and joins sparse areas to",
-                "a single representative pixel."
+                "A diffusion algorithm is used to spread out dense areas and join sparse",
+                "areas to a single representative pixel."
             ]
         tile_count = bytes_written = 0
         if tile_width is not None:
@@ -221,7 +234,8 @@ def render_catalogue(staged, source, levels, tile_width, romania_patch, slice_na
             if annotated:
                 cover = annotate(image, title, subtitle, lines, population.bounds,
                                  projected_bounds=projection_metadata.get("projectedBounds"),
-                                 projection_name="Equal Earth" if earth is not None else "Cylindrical equal-area")
+                                 projection_name="Equal Earth" if earth is not None else "Cylindrical equal-area",
+                                 source_credit="Population estimates from " +SOURCE_CREDITS.get(source.name))
             write_map(staged / MAP_FILENAME, cover, raw=raw)
         report["levels"].append({**metadata, **audit, "tiles": tile_count, "tileBytes": bytes_written})
     if tile_width is not None:
@@ -248,8 +262,6 @@ def main():
                         help="map grid (default: %(default)s)")
     parser.add_argument("--tile-width", type=int, help="also export tiles of this size at multiple zoom steps")
     parser.add_argument("--pop-target", type=int, required=True, help="people represented by one bright pixel")
-    parser.add_argument("--romania-patch", action=argparse.BooleanOptionalAction, default=True,
-                        help="correct the original WorldPop Romania window (default: enabled)")
     parser.add_argument("--annotated", action="store_true", help="draw a title and credits on the map")
     parser.add_argument("--raw", action="store_true", help="export a heatmap of the aggregated source population")
     parser.add_argument("--force-rerun", action="store_true", help="recompute and refresh cached data")

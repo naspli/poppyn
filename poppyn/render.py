@@ -75,7 +75,7 @@ def caption_font(size, bold=False):
 
 
 def annotate(image, title, subtitle, details, bounds, *, projected_bounds=None,
-             projection_name="Cylindrical equal-area"):
+             projection_name="Cylindrical equal-area", source_credit=None):
     if projected_bounds is None:
         west, south, east, north = bounds
         latitude = (south + north) / 2
@@ -94,11 +94,12 @@ def annotate(image, title, subtitle, details, bounds, *, projected_bounds=None,
         *((text, 0.40, False, 125) for text in details),
     ]
     credits = (
-        area_caption,
-        "WorldPop 2020 DOI 10.5258/SOTON/WP00647 · CC BY 4.0",
+        f"{image.width:,} × {image.height:,} px · {area_caption}",
+        source_credit,
+        "Land boundary from Natural Earth",
         "Poppyn by naspli.io · github.com/naspli/poppyn",
     )
-    footer = [(line, 0.34, False, 115) for line in credits]
+    footer = [(line, 0.34, False, 115) for line in credits if line]
     padding = max(2, round(min(image.width / 60, image.height / 22)))
     size = max(1, round(min(image.width / 72, image.height / 12)))
     overlay = Image.new("RGBA", image.size)
