@@ -3,11 +3,13 @@
 from contextlib import contextmanager
 import fcntl
 import json
+import os
 from pathlib import Path
 import re
+from stat import S_ISREG
 from tempfile import TemporaryDirectory
 
-from PIL import Image
+from PIL.PngImagePlugin import PngImageFile
 
 from .render import MAP_FILENAME
 
@@ -20,7 +22,8 @@ def validate_destination(output, report_path, *, raw):
     map_path = output / MAP_FILENAME
     try:
         if map_path.is_file() and not map_path.is_symlink():
-            with Image.open(map_path) as image:
+            # Poppyn writes the export tag before the PNG pixel data.
+            with PngImageFile(map_path) as image:
                 kind = image.info.get("poppyn-kind")
             if kind not in ("binary", "raw"):
                 raise ValueError
@@ -33,7 +36,7 @@ def validate_destination(output, report_path, *, raw):
             kind = manifest.get("kind", "binary")
             directory_pattern = r"[0-9]+(?:/[0-9]+)?"
             file_pattern = r"manifest\.json|[0-9]+/(?:map(?:-annotated)?\.png|[0-9]+/[0-9]+\.png)"
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, SyntaxError, ValueError, KeyError, TypeError):
         raise ValueError(f"output must be empty or an existing Poppyn export: {output}") from None
     existing_raw = kind == "raw"
     if existing_raw != raw:
@@ -49,10 +52,34 @@ def validate_destination(output, report_path, *, raw):
 
 
 @contextmanager
+def output_lock(path):
+    while True:
+        lock = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o666)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            locked_file = os.fstat(lock)
+            # A waiting run can acquire a lock that the previous run already unlinked.
+            try:
+                current_file = path.lstat()
+            except FileNotFoundError:
+                continue
+            if not os.path.samestat(locked_file, current_file):
+                continue
+            if not S_ISREG(locked_file.st_mode) or locked_file.st_size:
+                raise ValueError(f"output lock must be an empty regular file: {path}")
+            try:
+                yield
+            finally:
+                path.unlink(missing_ok=True)
+            return
+        finally:
+            os.close(lock)
+
+
+@contextmanager
 def catalogue_stage(output, report_path, *, raw):
     output.parent.mkdir(parents=True, exist_ok=True)
-    with (output.parent / f".{output.name}.lock").open("ab") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with output_lock(output.parent / f".{output.name}.lock"):
         validate_destination(output, report_path, raw=raw)
         with TemporaryDirectory(prefix="poppyn-output-", dir=output.parent) as directory:
             staged = Path(directory) / "next"

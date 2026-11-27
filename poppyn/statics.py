@@ -1,7 +1,4 @@
-"""Geographic bounds for the source raster and named map regions."""
-
-WORLD_SHAPE = (18_720, 43_200)
-WORLD_BOUNDS = (-180.001249265, -72.00041617729, 179.998749295, 83.99958319871)
+"""Geographic bounds for named map regions."""
 
 # WGS 84 degrees in (west, south, east, north) order.
 WORLD_SLICES = {

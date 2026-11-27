@@ -1,11 +1,15 @@
 """Population accounting checks on small fixtures with known answers."""
 
+from concurrent.futures import ThreadPoolExecutor
+from fcntl import LOCK_NB, flock
+import gzip
 import json
 import math
 from pathlib import Path
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from threading import Event, main_thread, current_thread
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -13,11 +17,12 @@ import numpy as np
 from PIL import Image
 from tifffile import imwrite
 
-from poppyn.population import Bins, Level, correct_romania, levels_for_source, read_population
+from poppyn.output import catalogue_stage
+from poppyn.population import Bins, Level, levels_for_source, read_population
 from poppyn.prepare import generate
-from poppyn.projection import EQUAL_EARTH, equal_earth_parallel
+from poppyn.projection import EQUAL_AREA, EQUAL_EARTH, GEOGRAPHIC, equal_earth_parallel
 from poppyn.redistribution import gather, round_marks, settle
-from poppyn.render import OUTSIDE, WATER, annotate, binary_image, write_tiles
+from poppyn.render import LAND, MARK, OUTSIDE, WATER, annotate, binary_image, write_tiles
 
 
 def write_population_tiff(path, counts, nodata="-9999", *, step=0.25, west=12, north=33):
@@ -87,6 +92,43 @@ class PopulationTests(TestCase):
         self.assertAlmostEqual(northing, 4_242_849.758, places=2)
         self.assertAlmostEqual(longitude_delta * longitude_scale, -2_390_749.043, places=2)
 
+    def test_lake_mask_keeps_shores_and_islands_across_source_tile_and_crop_edges(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "population.tif"
+            write_population_tiff(source, np.full((32, 32), 100, dtype=np.float32))
+            mask_data = root / "lakes.geojson.gz"
+            with gzip.open(mask_data, "wt", encoding="utf-8") as file:
+                json.dump({"features": [{"geometry": {"type": "Polygon", "coordinates": [
+                    [[14, 27], [18, 27], [18, 31], [14, 31], [14, 27]],
+                    [[15.75, 28.75], [15.75, 29.25], [16.25, 29.25], [16.25, 28.75], [15.75, 28.75]],
+                ]}}]}, file)
+            with patch("poppyn.lakes.LAKES_PATH", mask_data):
+                full = read_population(source, [Level(32, 32, 100)])
+                crop = read_population(source, [Level(12, 8, 100)], slice_name="fixture",
+                                       slice_window=(12, 20, 10, 22))
+                levels = levels_for_source(source, 32, 100, slice_name="world", slice_window=None,
+                                           projection=EQUAL_EARTH)
+                report = generate(source, root / "out", levels, projection=EQUAL_EARTH, raw=True,
+                                  cache_dir=root / "cache")
+                cached = generate(source, root / "out", levels, projection=EQUAL_EARTH, raw=True,
+                                  cache_dir=root / "cache")
+
+            counts, land = full.grids[0]
+            # The 16-by-16 lake leaves a 12-by-12 interior. Its island and margin occupy 6 by 6.
+            self.assertEqual(full.lake_removed, (12**2 - 6**2) * 100)
+            self.assertEqual(full.population - counts.sum(), full.lake_removed)
+            self.assertFalse(counts[~land].any())
+            self.assertTrue(land[9, 14])  # Shoreline band.
+            self.assertTrue(land[13, 13])  # Diagonal neighbour of the island's shoreline.
+            self.assertTrue(land[16, 16])  # Island at the junction of four tiles.
+            self.assertFalse(land[16, 19])  # Open water immediately beyond the island's band.
+            np.testing.assert_array_equal(crop.grids[0][0], counts[12:20, 10:22])
+            np.testing.assert_array_equal(crop.grids[0][1], land[12:20, 10:22])
+            self.assertAlmostEqual(report["lakePopulationRemovedPeople"], full.lake_removed)
+            self.assertAlmostEqual(report["levels"][0]["aggregatedPopulation"], counts.sum())
+            self.assertEqual(cached["lakePopulationRemovedPeople"], report["lakePopulationRemovedPeople"])
+
     def test_equal_earth_slice_includes_extra_population_across_antimeridian(self):
         with TemporaryDirectory() as directory:
             source = Path(directory) / "population.tif"
@@ -116,11 +158,11 @@ class PopulationTests(TestCase):
             nodata = np.finfo(np.float32).min
             raw = np.full((4, 5), nodata, dtype=np.float32)
             raw[0, 0], raw[1, 0], raw[2, 4] = 0, 30, 10
-            write_population_tiff(source, raw, str(float(nodata)))
+            write_population_tiff(source, raw, str(float(nodata)), west=-30, north=-5)
             level = Level(2, 2, 40)
             population = read_population(source, [level])
             counts, land = population.grids[0]
-            self.assertEqual(population.bounds, (12, 32, 13.25, 33))
+            self.assertEqual(population.bounds, (-30, -6, -28.75, -5))
             self.assertEqual(population.population, 40)
             np.testing.assert_array_equal(land, [[True, False], [False, True]])
             np.testing.assert_array_equal(counts, [[30, 0], [0, 10]])
@@ -128,13 +170,6 @@ class PopulationTests(TestCase):
             self.assertEqual({path.name for path in output.iterdir()}, {"poppyn-map.png"})
             with Image.open(output / "poppyn-map.png") as image:
                 np.testing.assert_array_equal(image, [[2, 0], [0, 1]])
-
-    def test_romania_patch_keeps_original_mask(self):
-        values = np.array([[15, -9999], [0, 25]], dtype=np.float32)
-        values.flags.writeable = False
-        changed, delta = correct_romania(values, values >= 0, 4738, 24755)
-        np.testing.assert_array_equal(changed, [[10, -9999], [10, 10]])
-        self.assertEqual(delta, -10)
 
     def test_named_slice_crosses_tiff_tile_edges(self):
         with TemporaryDirectory() as directory:
@@ -152,24 +187,6 @@ class PopulationTests(TestCase):
             np.testing.assert_array_equal(counts, [[14.5, 33.5], [71.5, 83.5]])
             self.assertTrue(land.all())
 
-    def test_romania_correction_is_enabled_by_default_with_absolute_slice_indices(self):
-        with TemporaryDirectory() as directory:
-            source = Path(directory) / "population.tif"
-            counts = np.full((4, 5), 25, dtype=np.float32)
-            counts[1, 2] = -9999
-            write_population_tiff(source, counts)
-            with patch("poppyn.population.WORLD_SHAPE", counts.shape), \
-                    patch("poppyn.population.WORLD_BOUNDS", (12, 32, 13.25, 33)), \
-                    patch("poppyn.population.ROMANIA", (1, 3, 2, 4)):
-                options = {"slice_name": "fixture", "slice_window": (1, 3, 2, 4)}
-                levels = [Level(2, 2, 25)]
-                corrected = read_population(source, levels, **options)
-                original = read_population(source, levels, romania_patch=False, **options)
-            self.assertEqual(corrected.correction, -45)
-            self.assertEqual(original.correction, 0)
-            np.testing.assert_array_equal(corrected.grids[0][0], [[0, 10], [10, 10]])
-            np.testing.assert_array_equal(original.grids[0][0], [[0, 25], [25, 25]])
-
     def test_png_edge_tile_dimensions(self):
         level = Level(513, 515, 1)
         land = np.zeros((level.height, level.width), dtype=bool)
@@ -185,6 +202,39 @@ class PopulationTests(TestCase):
 
 
 class OutputTests(TestCase):
+    def test_nodata_land_has_land_colour_and_never_receives_a_mark(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "population.tif"
+            values = np.full((16, 16), -9999, dtype=np.float32)
+            values[4, 4] = 100
+            write_population_tiff(source, values, step=1, west=-8, north=8)
+            land_path, lake_path = (root / f"{name}.geojson.gz" for name in ("land", "lake"))
+            for path, extent in ((land_path, 6), (lake_path, 2)):
+                ring = [[-extent, -extent], [extent, -extent], [extent, extent], [-extent, extent], [-extent, -extent]]
+                with gzip.open(path, "wt", encoding="utf-8") as file:
+                    json.dump({"features": [{"geometry": {"type": "Polygon", "coordinates": [ring]}}]}, file)
+            with patch("poppyn.basemap.LAND_PATH", land_path), patch("poppyn.lakes.LAKES_PATH", lake_path):
+                for projection in (GEOGRAPHIC, EQUAL_AREA, EQUAL_EARTH):
+                    levels = levels_for_source(source, 16, 100, slice_name="world", slice_window=None,
+                                               projection=projection)
+                    for raw in (False, True):
+                        with self.subTest(projection=projection, raw=raw):
+                            output = root / f"{projection}-{raw}"
+                            report = generate(source, output, levels, projection=projection, raw=raw)
+                            self.assertAlmostEqual(report["levels"][0]["aggregatedPopulation"], 100)
+                            with Image.open(output / "poppyn-map.png") as image:
+                                colours = image.convert("RGB")
+                                middle = image.height // 2
+                                self.assertEqual(colours.getpixel((0, middle)), WATER)  # Ocean.
+                                self.assertEqual(colours.getpixel((3, middle)), LAND)   # NoData on land.
+                                self.assertEqual(colours.getpixel((8, middle)), WATER)  # Lake.
+                                if not raw:
+                                    bright = np.all(np.asarray(colours) == MARK, axis=-1)
+                                    self.assertEqual(bright.sum(), 1)
+                                    self.assertLess(np.nonzero(bright)[0][0], middle)
+                                    self.assertLess(np.nonzero(bright)[1][0], 6)
+
     def test_equal_earth_world_distinguishes_outside_from_water(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -209,7 +259,7 @@ class OutputTests(TestCase):
     def test_cli_names_maps_by_width_and_includes_an_exact_maximum(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            source = root / "data/raw/ppp_2020_1km_Aggregated.tif"
+            source = root / "data/raw/global_pop_2025_CN_1km_R2025A_v1.tif"
             source.parent.mkdir(parents=True)
             write_population_tiff(source, np.ones((8, 10), dtype=np.float32))
             script = Path(__file__).resolve().parents[1] / "run_all.py"
@@ -279,7 +329,8 @@ class OutputTests(TestCase):
             root = Path(directory)
             source = root / "population.tif"
             output = root / "raw"
-            write_population_tiff(source, np.array([[0, 1, 5], [-9999, 10, 100]], dtype=np.float32))
+            write_population_tiff(source, np.array([[0, 1, 5], [-9999, 10, 100]], dtype=np.float32),
+                                  west=-30, north=-5)
             with patch("poppyn.prepare.settle", side_effect=AssertionError("raw export ran the solver")):
                 generate(source, output, [Level(3, 2, 50)], tile_width=3, raw=True)
             manifest = json.loads((output / "tiles_3/manifest.json").read_text())
@@ -312,6 +363,62 @@ class OutputTests(TestCase):
         self.assertTrue((light_red[:50][strongest_ink] - title[strongest_ink] < 80).all())
         self.assertEqual(lighter.getpixel((240, 104)), (80, 80, 80))
 
+    def test_rerun_accepts_an_export_above_pillows_pixel_limit(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "population.tif"
+            output = root / "map"
+            levels = [Level(2, 2, 20)]
+            write_population_tiff(source, np.full((2, 2), 5, dtype=np.float32))
+            generate(source, output, levels)
+
+            write_population_tiff(source, np.full((2, 2), 10, dtype=np.float32))
+            with patch.object(Image, "MAX_IMAGE_PIXELS", 1):
+                with self.assertRaises(Image.DecompressionBombError):
+                    Image.open(output / "poppyn-map.png")
+                report = generate(source, output, levels)
+
+            self.assertEqual(report["levels"][0]["marks"], 2)
+            with Image.open(output / "poppyn-map.png") as image:
+                self.assertEqual(np.count_nonzero(np.asarray(image) == 2), 2)
+
+    def test_waiting_export_retries_when_the_lock_file_is_replaced(self):
+        opened_old_lock, proceed, blocked_on_current = Event(), Event(), Event()
+        attempts = 0
+
+        def acquire(fd, operation):
+            nonlocal attempts
+            if current_thread() is not main_thread():
+                attempts += 1
+                if attempts == 1:
+                    opened_old_lock.set()
+                    self.assertTrue(proceed.wait(timeout=5))
+                elif attempts == 2:
+                    with self.assertRaises(BlockingIOError):
+                        flock(fd, operation | LOCK_NB)
+                    blocked_on_current.set()
+            flock(fd, operation)
+
+        with TemporaryDirectory() as directory, ThreadPoolExecutor(max_workers=1) as worker:
+            output = Path(directory) / "map"
+            lock = output.with_name(".map.lock")
+
+            def stage_again():
+                with catalogue_stage(output, None, raw=False):
+                    self.assertTrue(lock.is_file())
+
+            with patch("poppyn.output.fcntl.flock", side_effect=acquire):
+                with catalogue_stage(output, None, raw=False):
+                    waiting = worker.submit(stage_again)
+                    self.assertTrue(opened_old_lock.wait(timeout=5))
+                self.assertFalse(lock.exists())
+                with catalogue_stage(output, None, raw=False):
+                    proceed.set()
+                    self.assertTrue(blocked_on_current.wait(timeout=5))
+                    self.assertFalse(waiting.done())
+                waiting.result(timeout=5)
+            self.assertFalse(lock.exists())
+
     def test_cached_rerun_reuses_results_and_source_changes_invalidate_them(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -339,6 +446,7 @@ class OutputTests(TestCase):
             with self.assertRaises(FileNotFoundError):
                 generate(source, output, levels, report_path=root / "missing" / "report.json", **options)
             self.assertEqual((output / "poppyn-map.png").read_bytes(), latest_bytes)
+            self.assertFalse((root / ".tiles.lock").exists())
 
             unrelated = output / "notes.txt"
             unrelated.write_text("keep", encoding="utf-8")

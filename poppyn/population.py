@@ -8,10 +8,11 @@ from pathlib import Path
 import numpy as np
 from tifffile import TiffFile
 
+from .lakes import LakeMask
 from .projection import (
     EQUAL_AREA, EQUAL_EARTH, GEOGRAPHIC, EqualEarth, equal_area_bounds, equal_area_northing, equal_earth_bands,
 )
-from .statics import WORLD_BOUNDS, WORLD_SHAPE, WORLD_SLICES
+from .statics import WORLD_SLICES
 
 
 @dataclass(frozen=True)
@@ -26,9 +27,6 @@ class Level:
             "height": self.height,
             "peoplePerMark": self.people_per_mark,
         }
-
-
-ROMANIA = (4_738, 4_810, 24_755, 24_969)
 
 
 def source_window(source_shape, bounds, slice_name, slice_window):
@@ -91,7 +89,7 @@ def levels_for_source(source, max_width, pop_target, *, tile_width=None, slice_n
 class Population:
     bounds: tuple[float, float, float, float]
     population: float
-    correction: float
+    lake_removed: float
     grids: list[tuple[np.ndarray, np.ndarray]]
     window: tuple[int, int, int, int]
 
@@ -257,25 +255,6 @@ def window_bounds(page, bounds, window):
             west + right * scale_x, north - top * scale_y)
 
 
-def correct_romania(values, valid, top, left):
-    first_row, last_row, first_column, last_column = ROMANIA
-    height, width = values.shape
-    start_y = max(first_row, top) - top
-    end_y = min(last_row, top + height) - top
-    start_x = max(first_column, left) - left
-    end_x = min(last_column, left + width) - left
-    if start_y >= end_y or start_x >= end_x:
-        return values, 0.0
-    section = np.s_[start_y:end_y, start_x:end_x]
-    # Tifffile can decode a tile into a read-only buffer.
-    values = values.copy()
-    window = values[section]
-    land = valid[section]
-    difference = 10 * land.sum() - np.sum(window, dtype=np.float64, where=land)
-    window[land] = 10.0
-    return values, float(difference)
-
-
 def population_chunks(page, first_row, last_row, column_windows):
     # Decode at raster precision because tifffile can reject WorldPop's float32 minimum.
     no_data = page.dtype.type(page.tags["GDAL_NODATA"].value.replace(",", "."))
@@ -297,7 +276,7 @@ def population_chunks(page, first_row, last_row, column_windows):
                 yield values, valid, start_y, start_x, shift
 
 
-def read_population(source: Path, levels: list[Level], romania_patch=True, *,
+def read_population(source: Path, levels: list[Level], *,
                     slice_name="world", slice_window=None, projection=GEOGRAPHIC):
     """Stream decoded TIFF tiles once and reduce each requested level directly."""
     with TiffFile(source) as tiff:
@@ -306,11 +285,7 @@ def read_population(source: Path, levels: list[Level], romania_patch=True, *,
             raise ValueError("expected a single-channel population raster with a NoData tag")
         bounds = raster_bounds(page)
         raster_west, _, raster_east, _ = bounds
-        # The correction uses absolute source indices in the original WorldPop raster.
-        apply_correction = romania_patch and page.shape == WORLD_SHAPE and all(
-            math.isclose(value, expected, rel_tol=0, abs_tol=1e-6)
-            for value, expected in zip(bounds, WORLD_BOUNDS)
-        )
+        lakes = LakeMask(bounds, page.shape)
         window = source_window(page.shape, bounds, slice_name, slice_window)
         first_row, last_row, first_column, last_column = window
         if slice_window is not None or slice_name != "world":
@@ -330,32 +305,36 @@ def read_population(source: Path, levels: list[Level], romania_patch=True, *,
             step = (raster_east - raster_west) / page.imagewidth
             column_windows = list(longitude_windows(raster_west, step, page.imagewidth, earth))
             accumulators = [EqualEarthBins(row_edges, level, earth.bounds) for level in levels]
-        source_total = 0.0
-        correction = 0.0
+        retained_total = 0.0
+        lake_removed = 0.0
         for values, valid, top, left, shift in population_chunks(page, first_row, last_row, column_windows):
-            corrected, delta = correct_romania(values, valid, top, left) if apply_correction else (values, 0.0)
+            water = lakes.interior(top, left, values.shape)
+            removed = None if water is None else water & valid
+            if removed is not None and removed.any():
+                valid &= ~removed
+            else:
+                removed = None
             if earth is None:
-                source_total += float(np.sum(values, dtype=np.float64, where=valid))
-                correction += delta
+                retained_total += float(np.sum(values, dtype=np.float64, where=valid))
+                if removed is not None:
+                    lake_removed += float(np.sum(values, dtype=np.float64, where=removed))
                 for bins in accumulators:
-                    bins.add(corrected, valid, top - first_row, left - first_column)
+                    bins.add(values, valid, top - first_row, left - first_column)
             else:
                 first_band = 2 * (top - first_row)
                 bands = slice(first_band, first_band + 2 * values.shape[0])
                 west = raster_west - earth.meridian + left * step + shift
                 chunk = EqualEarthChunk(values, valid, first_band, scales[bands], weights[bands], west, step)
                 west, _, east, _ = earth.bounds
-                included = chunk.total(west, east)
-                source_total += included
-                if corrected is not values:
-                    chunk.set_population(corrected, valid)
-                    correction += chunk.total(west, east) - included
+                retained_total += chunk.total(west, east)
                 for bins in accumulators:
                     bins.add(chunk)
+                if removed is not None:
+                    chunk.set_population(values, removed)
+                    lake_removed += chunk.total(west, east)
 
-    expected = source_total + correction
     for level, bins in zip(levels, accumulators):
-        if not math.isclose(bins.counts.sum(), expected, rel_tol=1e-12, abs_tol=1e-6):
+        if not math.isclose(bins.counts.sum(), retained_total, rel_tol=1e-12, abs_tol=1e-6):
             raise ValueError(f"the {level.width:,}-pixel map lost population during aggregation")
-    return Population(bounds, source_total, correction,
+    return Population(bounds, retained_total + lake_removed, lake_removed,
                       [(bins.counts, bins.land) for bins in accumulators], window)
